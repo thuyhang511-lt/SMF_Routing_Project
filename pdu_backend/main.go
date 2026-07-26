@@ -24,6 +24,11 @@ func main() {
 		json.NewEncoder(w).Encode(response)
 	})
 
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
 	address := ":" + *port
 	fmt.Printf("PDU Backend đang chạy tại cổng%s\n", address)
 	log.Fatal(http.ListenAndServe(address, nil))
