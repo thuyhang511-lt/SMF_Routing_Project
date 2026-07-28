@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -9,7 +11,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"encoding/json"
+	"hash/crc32"
+	"hash/fnv"
+	"strconv"
 )
+
+const M = 1009
 
 type Backend struct {
 	URL          *url.URL
@@ -29,9 +38,75 @@ type BackendPool struct {
 	counter  uint64
 	mutex    sync.Mutex
 	algo     string // "round-robin", "weighted", "least-load"
+
+	maglevD        []int
+	maglevBackends []*Backend
 }
 
-func (p *BackendPool) GetNextPeer() *Backend {
+func hash1(s string) int {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return int(h.Sum32())
+}
+
+func hash2(s string) int {
+	return int(crc32.ChecksumIEEE([]byte(s)))
+}
+
+func (p *BackendPool) buildMaglev() {
+	var healthy []*Backend
+	for _, b := range p.backends {
+		if b.Alive {
+			healthy = append(healthy, b)
+		}
+	}
+
+	N := len(healthy)
+	if N == 0 {
+		p.maglevD = nil
+		p.maglevBackends = nil
+		return
+	}
+
+	T := make([][]int, N)
+	for i, b := range healthy {
+		name := b.URL.String()
+		offset := hash1(name) % M
+		skip := (hash2(name) % (M - 1)) + 1
+
+		T[i] = make([]int, M)
+		for j := 0; j < M; j++ {
+			T[i][j] = (offset + j*skip) % M
+		}
+	}
+
+	D := make([]int, M)
+	for i := range D {
+		D[i] = -1
+	}
+
+	next := make([]int, N)
+	filled := 0
+
+	for filled < M {
+		for i := 0; i < N; i++ {
+			for next[i] < M {
+				b := T[i][next[i]]
+				next[i]++
+				if D[b] == -1 {
+					D[b] = i
+					filled++
+					break
+				}
+			}
+		}
+	}
+
+	p.maglevD = D
+	p.maglevBackends = healthy
+}
+
+func (p *BackendPool) GetNextPeer(bodyBytes []byte) *Backend {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
@@ -53,6 +128,8 @@ func (p *BackendPool) GetNextPeer() *Backend {
 		return p.getWeighted(healthyBackends)
 	case "least-load":
 		return p.getLeaseLoad(healthyBackends)
+	case "maglev":
+		return p.getMaglev(bodyBytes)
 	default:
 		return p.getRoundRobin(healthyBackends)
 	}
@@ -99,10 +176,44 @@ func (p *BackendPool) getLeaseLoad(healthy []*Backend) *Backend {
 	return best
 }
 
+// MAGLEV HASHING
+func (p *BackendPool) getMaglev(bodyBytes []byte) *Backend {
+	if len(p.maglevD) == 0 || len(p.maglevBackends) == 0 {
+		return nil
+	}
+
+	// Đọc supi từ JSON
+	var payload struct {
+		Supi string `json:"supi"`
+	}
+	json.Unmarshal(bodyBytes, &payload)
+	supi := payload.Supi
+
+	bucketId := 0
+	if len(supi) >= 3 {
+		last3 := supi[len(supi)-3:]
+		val, err := strconv.Atoi(last3)
+		if err == nil {
+			bucketId = val % M
+		} else {
+			bucketId = hash1(supi) % M
+		}
+	} else {
+		bucketId = hash1(supi) % M
+	}
+
+	pduIndex := p.maglevD[bucketId]
+	if pduIndex >= 0 && pduIndex < len(p.maglevBackends) {
+		return p.maglevBackends[pduIndex]
+	}
+	return nil
+}
+
 func healthCheck(pool *BackendPool) {
 	ticket := time.NewTicker(time.Second * 5)
 	for {
 		<-ticket.C
+		changed := false
 
 		pool.mutex.Lock() // Khoa Ghi
 		for _, b := range pool.backends {
@@ -121,12 +232,18 @@ func healthCheck(pool *BackendPool) {
 			// In log neu trang thai thay doi
 			if b.Alive != alive {
 				b.Alive = alive
+				changed = true
 				status := "SẬP (DOWN)"
 				if alive {
 					status = "SỐNG (UP)"
 				}
 				fmt.Printf("[HealthCheck] Cảnh báo: Backend %s đang %s\n", b.URL.String(), status)
 			}
+		}
+
+		if changed {
+			fmt.Println("[Maglev] Phát hiện thay đổi, đang xây dựng lại bảng Hash...")
+			pool.buildMaglev()
 		}
 		pool.mutex.Unlock() // Mo khoa Ghi
 	}
@@ -159,13 +276,16 @@ func main() {
 		})
 	}
 
+	// Khoi tao bang Maglev
+	pool.buildMaglev()
+
 	// Goroutine chay ngam Health Check
 	go healthCheck(pool)
 
 	// API doi thuat toan
 	http.HandleFunc("/admin/algo", func(w http.ResponseWriter, r *http.Request) {
 		algo := r.URL.Query().Get("name")
-		if algo == "round-robin" || algo == "weighted" || algo == "least-load" {
+		if algo == "round-robin" || algo == "weighted" || algo == "least-load" || algo == "maglev" {
 			pool.mutex.Lock()
 			pool.algo = algo
 			pool.mutex.Unlock()
@@ -177,8 +297,15 @@ func main() {
 	})
 
 	// API Routing chinh
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		peer := pool.GetNextPeer()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Doc Body de lay SUPI
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err == nil {
+			// Khoi phuc lai Body de Reverse Proxy forward tiep di
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		}
+
+		peer := pool.GetNextPeer(bodyBytes)
 		if peer != nil {
 			// TANG bien dem tai (Load) truoc khi forward
 			atomic.AddInt32(&peer.ActiveRequests, 1)
@@ -196,7 +323,18 @@ func main() {
 		w.Write([]byte(`{"status": "ERROR", "cause": "NO_BACKEND_AVAILABLE"}`))
 	})
 
+	// Khoi tao HTTP/2 Cleartext Server (theo chuan 3GPP)
+	server := &http.Server{
+		Addr:    ":8000",
+		Handler: handler,
+	}
+
+	// Ho tro HTTP/2 khong ma hoa (h2c) truc tiep tu thu vien chuan
+	server.Protocols = new(http.Protocols)
+	server.Protocols.SetHTTP1(true)
+	server.Protocols.SetUnencryptedHTTP2(true)
+
 	port := ":8000"
 	fmt.Printf("Gateway đang chạy tại cổng %s\n", port)
-	log.Fatal(http.ListenAndServe(port, nil))
+	log.Fatal(server.ListenAndServe())
 }
