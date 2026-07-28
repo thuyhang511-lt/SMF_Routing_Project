@@ -30,6 +30,16 @@ func main() {
 	})
 
 	address := ":" + *port
+
+	server := &http.Server{
+		Addr:    address,
+		Handler: nil,
+	}
+
+	server.Protocols = new(http.Protocols)
+	server.Protocols.SetHTTP1(true)
+	server.Protocols.SetUnencryptedHTTP2(true)
+
 	fmt.Printf("PDU Backend đang chạy tại cổng%s\n", address)
-	log.Fatal(http.ListenAndServe(address, nil))
+	log.Fatal(server.ListenAndServe())
 }
