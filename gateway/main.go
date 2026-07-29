@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -12,8 +15,44 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	"gateway/algorithm"
 )
+
+type TransportPool struct {
+	transports []http.RoundTripper
+	counter    uint64
+}
+
+func (tp *TransportPool) NextTransport() http.RoundTripper {
+	next := atomic.AddUint64(&tp.counter, 1)
+	idx := int((next - 1) % uint64(len(tp.transports)))
+	return tp.transports[idx]
+}
+
+func (tp *TransportPool) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Lay 1 transport ranh roi tu Pool de xu ly request nay
+	transport := tp.NextTransport()
+	return transport.RoundTrip(req)
+}
+
+// Ham khoi tao Pool gom 8 Transport (Client) cho HTTP/2
+func NewTransportPool(poolSize int) *TransportPool {
+	tp := &TransportPool{
+		transports: make([]http.RoundTripper, poolSize),
+	}
+
+	for i := 0; i < poolSize; i++ {
+		tp.transports[i] = &http2.Transport{
+			AllowHTTP: true,
+			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+				return net.Dial(network, addr)
+			},
+		}
+	}
+	return tp
+}
 
 type BackendPool struct {
 	backends []*algorithm.Backend
@@ -29,6 +68,7 @@ func (p *BackendPool) buildMaglev() {
 	if p.maglev == nil {
 		p.maglev = &algorithm.Maglev{}
 	}
+
 	var healthy []*algorithm.Backend
 	for _, b := range p.backends {
 		if b.Alive {
@@ -130,17 +170,27 @@ func main() {
 	}
 
 	pool := &BackendPool{
-		algo: "round-robin",
+		algo:    "round-robin",
+		lbState: &algorithm.LoadBalancerState{},
+		maglev:  &algorithm.Maglev{},
 	}
+
+	// Khoi tao 1 pool gom 8 ket noi
+	sharedTransportPool := NewTransportPool(8)
 
 	// Khoi tao cac Backend cho vao Pool
 	for _, cfg := range configs {
 		parsedUrl, _ := url.Parse(cfg.url)
+
+		proxy := httputil.NewSingleHostReverseProxy(parsedUrl)
+		// Gan TransportPool vao ReverseProxy
+		proxy.Transport = sharedTransportPool
+
 		pool.backends = append(pool.backends, &algorithm.Backend{
 			URL:          parsedUrl,
 			Alive:        true,
 			Weight:       cfg.weight,
-			ReverseProxy: httputil.NewSingleHostReverseProxy(parsedUrl),
+			ReverseProxy: proxy,
 		})
 	}
 
@@ -150,8 +200,10 @@ func main() {
 	// Goroutine chay ngam Health Check
 	go healthCheck(pool)
 
+	mux := http.NewServeMux()
+
 	// API doi thuat toan
-	http.HandleFunc("/admin/algo", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin/algo", func(w http.ResponseWriter, r *http.Request) {
 		algo := r.URL.Query().Get("name")
 		if algo == "round-robin" || algo == "weighted" || algo == "load-based" || algo == "maglev" {
 			pool.mutex.Lock()
@@ -165,7 +217,7 @@ func main() {
 	})
 
 	// API Routing chinh
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Doc Body de lay SUPI
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err == nil {
@@ -194,7 +246,7 @@ func main() {
 	// Khoi tao HTTP/2 Cleartext Server (theo chuan 3GPP)
 	server := &http.Server{
 		Addr:    ":8000",
-		Handler: handler,
+		Handler: mux,
 	}
 
 	// Ho tro HTTP/2 khong ma hoa (h2c) truc tiep tu thu vien chuan
