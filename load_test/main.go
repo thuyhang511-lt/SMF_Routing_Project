@@ -44,7 +44,15 @@ func main() {
 
 			for j := 0; j < requestsPerWorker; j++ {
 				supi := fmt.Sprintf("imsi-%010d", (workerID*requestsPerWorker)+j)
-				body := []byte(fmt.Sprintf(`{"supi": "%s", "pduSessionId": 1}`, supi))
+				body := fmt.Appendf(nil, `{
+					"supi": "%s",
+					"gpsi": "msisdn-84900000001",
+					"pduSessionId": 1,
+					"dnn": "v-internet",
+					"sNssai": { "sst": 1, "sd": "000001" },
+					"servingNfd": "2ab2b5a9-68e8-4ee6-b939-024c109b520c",
+					"anType": "3GPP_ACCESS"
+				}`, supi)
 
 				req, _ := http.NewRequest("POST", gatewayURL, bytes.NewBuffer(body))
 				req.Header.Set("Content-Type", "application/json")
