@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -158,15 +160,36 @@ func healthCheck(pool *BackendPool) {
 }
 
 func main() {
-	// Khoi tao danh sach 3 backend co gan san Trong so
-	// 8081 mạnh nhất (Weight=3), 8082 vừa (2), 8083 yếu nhất (1)
-	configs := []struct {
+	// Khoi tao danh sach backend co gan san Trong so
+	// Uu tien doc tu bien moi truong BACKEND_URLS (vd khi chay trong Docker),
+	// neu khong co thi fallback ve localhost cho moi truong chay local
+	defaultWeights := []int{3, 2, 1}
+	var backendURLs []string
+	if envURLs := os.Getenv("BACKEND_URLS"); envURLs != "" {
+		for _, u := range strings.Split(envURLs, ",") {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				backendURLs = append(backendURLs, u)
+			}
+		}
+	} else {
+		backendURLs = []string{"http://localhost:8081", "http://localhost:8082", "http://localhost:8083"}
+	}
+
+	configs := make([]struct {
 		url    string
 		weight int
-	}{
-		{"http://localhost:8081", 3},
-		{"http://localhost:8082", 2},
-		{"http://localhost:8083", 1},
+	}, len(backendURLs))
+
+	for i, u := range backendURLs {
+		weight := 1
+		if i < len(defaultWeights) {
+			weight = defaultWeights[i]
+		}
+		configs[i] = struct {
+			url    string
+			weight int
+		}{u, weight}
 	}
 
 	pool := &BackendPool{

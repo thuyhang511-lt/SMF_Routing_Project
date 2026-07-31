@@ -1,0 +1,82 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: smf_postgres
+    environment:
+      - POSTGRES_USER=smf_user
+      - POSTGRES_PASSWORD=smf_password
+      - POSTGRES_DB=smf_db
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smf_user -d smf_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: smf_pgadmin
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@smf-routing.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+      - PGADMIN_CONFIG_SERVER_MODE=False
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    build:
+      context: ./gateway
+    container_name: smf_gateway
+    ports:
+      - "8000:8000"
+    depends_on:
+      - pdu_1
+      - pdu_2
+      - pdu_3
+    environment:
+      # Chuyển hướng traffic xuống các PDU container thay vì localhost
+      - BACKEND_URLS=http://pdu_1:8081,http://pdu_2:8082,http://pdu_3:8083
+
+  pdu_1:
+    build:
+      context: ./pdu_backend
+    container_name: smf_pdu_1
+    command: ["-port=8081"]
+    ports:
+      - "8081:8081"
+    environment:
+      # Sử dụng hostname 'postgres' do Docker tự động phân giải IP
+      - DB_URL=postgres://smf_user:smf_password@postgres:5432/smf_db?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  pdu_2:
+    build:
+      context: ./pdu_backend
+    container_name: smf_pdu_2
+    command: ["-port=8082"]
+    ports:
+      - "8082:8082"
+    environment:
+      - DB_URL=postgres://smf_user:smf_password@postgres:5432/smf_db?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  pdu_3:
+    build:
+      context: ./pdu_backend
+    container_name: smf_pdu_3
+    command: ["-port=8083"]
+    ports:
+      - "8083:8083"
+    environment:
+      - DB_URL=postgres://smf_user:smf_password@postgres:5432/smf_db?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
