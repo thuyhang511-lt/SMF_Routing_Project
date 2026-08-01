@@ -65,6 +65,10 @@ type BackendPool struct {
 	maglev  *algorithm.Maglev
 }
 
+var healthCheckClient = &http.Client{
+	Timeout: 2 * time.Second,
+}
+
 func (p *BackendPool) buildMaglev() {
 
 	if p.maglev == nil {
@@ -123,31 +127,45 @@ func healthCheck(pool *BackendPool) {
 	ticket := time.NewTicker(time.Second * 5)
 	for {
 		<-ticket.C
-		changed := false
 
-		pool.mutex.Lock() // Khoa Ghi
+		type pingResult struct {
+			backend *algorithm.Backend
+			alive   bool
+		}
+		results := make(chan pingResult, len(pool.backends))
+		var wg sync.WaitGroup
+
 		for _, b := range pool.backends {
-			pingURL := b.URL.String() + "/health"
-			// Goi HTTP GET toi backend
-			resp, err := http.Get(pingURL)
+			wg.Add(1)
+			go func(b *algorithm.Backend) {
+				defer wg.Done()
+				pingURL := b.URL.String() + "/health"
+				resp, err := healthCheckClient.Get(pingURL)
 
-			alive := false
-			if err == nil && resp.StatusCode == http.StatusOK {
-				alive = true
-			}
-			if resp != nil {
-				resp.Body.Close()
-			}
+				alive := false
+				if err == nil && resp.StatusCode == http.StatusOK {
+					alive = true
+				}
+				if resp != nil {
+					resp.Body.Close()
+				}
+				results <- pingResult{backend: b, alive: alive}
+			}(b)
+		}
+		wg.Wait()
+		close(results)
 
-			// In log neu trang thai thay doi
-			if b.Alive != alive {
-				b.Alive = alive
+		changed := false
+		pool.mutex.Lock()
+		for r := range results {
+			if r.backend.Alive != r.alive {
+				r.backend.Alive = r.alive
 				changed = true
 				status := "SẬP (DOWN)"
-				if alive {
+				if r.alive {
 					status = "SỐNG (UP)"
 				}
-				fmt.Printf("[HealthCheck] Cảnh báo: Backend %s đang %s\n", b.URL.String(), status)
+				fmt.Printf("[HealthCheck] Cảnh báo: Backend %s đang %s\n", r.backend.URL.String(), status)
 			}
 		}
 
@@ -155,7 +173,7 @@ func healthCheck(pool *BackendPool) {
 			fmt.Println("[Maglev] Phát hiện thay đổi, đang xây dựng lại bảng Hash...")
 			pool.buildMaglev()
 		}
-		pool.mutex.Unlock() // Mo khoa Ghi
+		pool.mutex.Unlock()
 	}
 }
 
