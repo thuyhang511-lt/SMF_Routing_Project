@@ -1,0 +1,31 @@
+# ==== Biến môi trường / secrets ====
+.env
+*.env
+!.env.example
+
+# ==== Go build artifacts ====
+gateway_app
+pdu_app
+*.exe
+*.test
+*.out
+/gateway/gateway_app
+/pdu_backend/pdu_app
+
+# ==== Go module cache / vendor (nếu có) ====
+vendor/
+
+# ==== IDE / editor ====
+.vscode/
+.idea/
+*.swp
+
+# ==== OS ====
+.DS_Store
+Thumbs.db
+
+# ==== Docker ====
+docker-compose.override.yml
+
+# ==== Logs ====
+*.log

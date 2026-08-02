@@ -3,9 +3,9 @@ services:
     image: postgres:15-alpine
     container_name: smf_postgres
     environment:
-      - POSTGRES_USER=smf_user
-      - POSTGRES_PASSWORD=smf_password
-      - POSTGRES_DB=smf_db
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB={POSTGRES_DB}
     ports:
       - "5432:5432"
     healthcheck:
@@ -18,8 +18,8 @@ services:
     image: dpage/pgadmin4:latest
     container_name: smf_pgadmin
     environment:
-      - PGADMIN_DEFAULT_EMAIL=admin@smf-routing.com
-      - PGADMIN_DEFAULT_PASSWORD=admin
+      - PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD={PGADMIN_DEFAULT_PASSWORD}
       - PGADMIN_CONFIG_SERVER_MODE=False
     ports:
       - "5050:80"
@@ -50,7 +50,7 @@ services:
       - "8081:8081"
     environment:
       # Sử dụng hostname 'postgres' do Docker tự động phân giải IP
-      - DB_URL=postgres://smf_user:smf_password@postgres:5432/smf_db?sslmode=disable
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,7 +63,7 @@ services:
     ports:
       - "8082:8082"
     environment:
-      - DB_URL=postgres://smf_user:smf_password@postgres:5432/smf_db?sslmode=disable
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,7 +76,7 @@ services:
     ports:
       - "8083:8083"
     environment:
-      - DB_URL=postgres://smf_user:smf_password@postgres:5432/smf_db?sslmode=disable
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
