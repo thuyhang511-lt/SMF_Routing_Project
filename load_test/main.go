@@ -50,7 +50,7 @@ func main() {
 					"pduSessionId": 1,
 					"dnn": "v-internet",
 					"sNssai": { "sst": 1, "sd": "000001" },
-					"servingNfd": "2ab2b5a9-68e8-4ee6-b939-024c109b520c",
+					"servingNfId": "2ab2b5a9-68e8-4ee6-b939-024c109b520c",
 					"anType": "3GPP_ACCESS"
 				}`, supi)
 

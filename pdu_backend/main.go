@@ -128,12 +128,15 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 	// Parse JSON body
 	var req CreateSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"erroe": "Invalid JSON"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"status": "ERROR", "cause": "INVALID_JSON"}`))
 		return
 	}
 
 	// Validate
 	if req.Supi == "" || req.PduSessionId == 0 || req.Dnn == "" || req.SNssai == nil {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"status": "ERROR", "cause": "MANDATORY_IE_MISSING"}`))
 		return
@@ -152,6 +155,7 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 	if dbPool != nil {
 		if err := saveSession(dbPool, req, response); err != nil {
 			log.Printf("[DB] Lỗi khi lưu session: %v\n", err)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(`{"status": "ERROR", "cause": "DB_WRITE_FAILED"}`))
 			return
