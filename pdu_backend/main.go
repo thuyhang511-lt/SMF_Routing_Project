@@ -187,11 +187,13 @@ func main() {
 		fmt.Println("[DB] Cảnh báo: không có DB_URL, chạy ở chế độ không lưu trữ")
 	}
 
-	http.HandleFunc("/nsmf-pdusession/v1/sm-contexts", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/nsmf-pdusession/v1/sm-contexts", func(w http.ResponseWriter, r *http.Request) {
 		pduSessionHandler(w, r, instanceName)
 	})
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
@@ -200,7 +202,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:    address,
-		Handler: nil,
+		Handler: mux,
 	}
 
 	server.Protocols = new(http.Protocols)
