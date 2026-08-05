@@ -51,6 +51,8 @@ func NewTransportPool(poolSize int) *TransportPool {
 			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 				return net.Dial(network, addr)
 			},
+			// ReadIdleTimeout: time.Second * 30,
+			// PingTimeout:     time.Second * 15,
 		}
 	}
 	return tp
@@ -260,10 +262,19 @@ func main() {
 	// API Routing chinh
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Doc Body de lay SUPI
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err == nil {
-			// Khoi phuc lai Body de Reverse Proxy forward tiep di
-			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		var bodyBytes []byte
+
+		pool.mutex.Lock()
+		currentAlgo := pool.algo
+		pool.mutex.Unlock()
+
+		if currentAlgo == "maglev" {
+			var err error
+			bodyBytes, err = io.ReadAll(r.Body)
+			if err == nil {
+				// Khoi phuc lai Body de Reverse Proxy forward tiep di
+				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			}
 		}
 
 		peer := pool.GetNextPeer(bodyBytes)
@@ -271,7 +282,7 @@ func main() {
 			// TANG bien dem tai (Load) truoc khi forward
 			atomic.AddInt32(&peer.ActiveRequests, 1)
 
-			fmt.Printf("[Gateway] Algo: %s | Forward request tới %s\n", pool.algo, peer.URL.String())
+			// fmt.Printf("[Gateway] Algo: %s | Forward request tới %s\n", pool.algo, peer.URL.String())
 			peer.ReverseProxy.ServeHTTP(w, r)
 
 			// GIAM bien dem tai sau khi xu ly xong
