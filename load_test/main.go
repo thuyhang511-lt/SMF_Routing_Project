@@ -19,6 +19,7 @@ func main() {
 
 	numWorkers := 100        // Chay 100 luong dong thoi
 	requestsPerWorker := 500 // Moi luong gui 500 request
+	// numClients := 8
 
 	fmt.Printf("Bắt đầu bài test tải: %d luồng x %d requests = %d tổng requests\n", numWorkers, requestsPerWorker, numWorkers*requestsPerWorker)
 	startTime := time.Now()
@@ -27,20 +28,34 @@ func main() {
 	var successCount int32
 	var errorCount int32
 
-	client := &http.Client{
-		Timeout: time.Second * 10,
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-				return net.Dial(network, addr)
-			},
-		},
-	}
+	// clientPool := make([]*http.Client, numClients)
+	// for i := range clientPool {
+	// 	clientPool[i] = &http.Client{
+	// 		Timeout: time.Second * 10,
+	// 		Transport: &http2.Transport{
+	// 			AllowHTTP: true,
+	// 			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+	// 				return net.Dial(network, addr)
+	// 			},
+	// 		},
+	// 	}
+	// }
 
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
+
+			//client := clientPool[workerID%numClients]
+			client := &http.Client{
+				Timeout: time.Second * 10,
+				Transport: &http2.Transport{
+					AllowHTTP: true,
+					DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+						return net.Dial(network, addr)
+					},
+				},
+			}
 
 			for j := 0; j < requestsPerWorker; j++ {
 				supi := fmt.Sprintf("imsi-%010d", (workerID*requestsPerWorker)+j)
@@ -81,3 +96,5 @@ func main() {
 	fmt.Printf("Số Request lỗi: %d\n", errorCount)
 	fmt.Printf("Tốc độ trung bình (TPS): %.2f requests/giây\n", float64(numWorkers*requestsPerWorker)/duration.Seconds())
 }
+
+// Ket qua TPS voi 1 hay 8 hay 100 Client deu ko co khac biet dang ke

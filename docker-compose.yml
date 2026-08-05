@@ -13,6 +13,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2.0'
+    #       memory: 512M
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 256M
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -26,6 +34,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '0.5'
+    #       memory: 512M
+    #     reservations:
+    #       cpus: '0.1'
+    #       memory: 256M
 
   gateway:
     build:
@@ -40,6 +56,15 @@ services:
     environment:
       # Chuyển hướng traffic xuống các PDU container thay vì localhost
       - BACKEND_URLS=http://pdu_1:8081,http://pdu_2:8082,http://pdu_3:8083
+    #   - GOMAXPROCS=1
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2.0'
+    #       memory: 128M
+    #     reservations:
+    #       cpus: '0.25'
+    #       memory: 64M
 
   pdu_1:
     build:
@@ -51,9 +76,18 @@ services:
     environment:
       # Sử dụng hostname 'postgres' do Docker tự động phân giải IP
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      # - GOMAXPROCS=1
     depends_on:
       postgres:
         condition: service_healthy
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 128M
+    #     reservations:
+    #       cpus: '0.25'
+    #       memory: 64M
 
   pdu_2:
     build:
@@ -64,9 +98,18 @@ services:
       - "8082:8082"
     environment:
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    #  - GOMAXPROCS=1
     depends_on:
       postgres:
         condition: service_healthy
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 128M
+    #     reservations:
+    #       cpus: '0.25'
+    #       memory: 64M
 
   pdu_3:
     build:
@@ -77,9 +120,21 @@ services:
       - "8083:8083"
     environment:
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    #  - GOMAXPROCS=1
     depends_on:
       postgres:
         condition: service_healthy
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 128M
+    #     reservations:
+    #       cpus: '0.25'
+    #       memory: 64M
 
 volumes:
   postgres_data:
+
+# sẽ có những mốc như khoảng 35k request mà đến đó, qua khoảng vài chục giây mà ko có context nào đc ghi vào db
+# khi đó CPU usage cũng rất thấp, khoảng 0-vài%/800%
