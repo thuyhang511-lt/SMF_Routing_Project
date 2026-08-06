@@ -65,8 +65,7 @@ type BackendPool struct {
 	lbState *algorithm.LoadBalancerState
 	maglev  *algorithm.Maglev
 
-	registryMutex sync.Mutex
-	registry      map[string]time.Time // ghi thoi gian song cuoi cung cua cac PDU
+	registry map[string]time.Time // ghi thoi gian song cuoi cung cua cac PDU
 }
 
 type HeartbeatMsg struct {
@@ -158,61 +157,41 @@ func main() {
 			return
 		}
 
-		pool.registryMutex.Lock()
-		pool.registry[msg.ID] = time.Now()
-		pool.registryMutex.Unlock()
+		pool.mutex.Lock()
+		defer pool.mutex.Unlock()
 
-		pool.mutex.RLock()
+		pool.registry[msg.ID] = time.Now()
+
 		exists := false
-		wasDead := false
 		for _, b := range pool.backends {
 			if b.ID == msg.ID {
-				exists = true
 				if !b.Alive {
-					wasDead = true
+					fmt.Printf("[Gateway] PDU %s đã SỐNG LẠI tại %s\n", msg.ID, msg.URL)
 				}
+				b.Alive = true
+				exists = true
 				break
 			}
 		}
-		pool.mutex.RUnlock()
 
-		if !exists || wasDead {
-			pool.mutex.Lock()
+		if !exists {
+			parsedUrl, _ := url.Parse(msg.URL)
+			proxy := httputil.NewSingleHostReverseProxy(parsedUrl)
+			proxy.Transport = sharedTransportPool
 
-			found := false
-			for _, b := range pool.backends {
-				if b.ID == msg.ID {
-					if !b.Alive {
-						b.Alive = true
-						fmt.Printf("[Gateway] PDU %s đã SỐNG LẠI tại %s\n", msg.ID, msg.URL)
-					}
-					found = true
-					break
-				}
+			newBackend := &algorithm.Backend{
+				ID:           msg.ID,
+				URL:          parsedUrl,
+				ReverseProxy: proxy,
+				Weight:       1,
+				Alive:        true,
 			}
+			pool.backends = append(pool.backends, newBackend)
+			fmt.Printf("[Gateway] Phát hiện PDU MỚI gia nhập vòng: %s (%s)\n", msg.ID, msg.URL)
 
-			if !found {
-				parsedUrl, _ := url.Parse(msg.URL)
-				proxy := httputil.NewSingleHostReverseProxy(parsedUrl)
-
-				proxy.Transport = sharedTransportPool
-
-				newBackend := &algorithm.Backend{
-					ID:           msg.ID,
-					URL:          parsedUrl,
-					ReverseProxy: proxy,
-					Weight:       1,
-					Alive:        true,
-				}
-
-				pool.backends = append(pool.backends, newBackend)
-				fmt.Printf("[Gateway] Phát hiện PDU MỚI gia nhập vòng: %s (%s)\n", msg.ID, msg.URL)
-
-				if pool.algo == "maglev" {
-					pool.buildMaglev()
-				}
+			if pool.algo == "maglev" {
+				pool.buildMaglev()
 			}
-			pool.mutex.Unlock()
 		}
 		w.WriteHeader(http.StatusOK)
 	})
@@ -221,7 +200,6 @@ func main() {
 		for {
 			time.Sleep(5 * time.Second)
 			pool.mutex.Lock()
-			pool.registryMutex.Lock()
 
 			changed := false
 			now := time.Now()
@@ -236,7 +214,6 @@ func main() {
 					}
 				}
 			}
-			pool.registryMutex.Unlock()
 
 			if changed && pool.algo == "maglev" {
 				pool.buildMaglev()
