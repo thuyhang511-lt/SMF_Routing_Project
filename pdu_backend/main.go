@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sync/atomic"
@@ -35,6 +37,11 @@ type CreateSessionResponse struct {
 	PduSessionId int    `json:"pduSessionId"`
 	HandledBy    string `json:"handledBy"`
 	Status       string `json:"status"`
+}
+
+type HeartbeatMsg struct {
+	ID  string `json:"id"`
+	URL string `json:"url"`
 }
 
 var activeRequests int32
@@ -168,7 +175,7 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 }
 
 func main() {
-	port := flag.String("port", "8081", "Cổng để chạy server")
+	port := flag.String("port", "0", "Cổng để chạy server")
 	flag.Parse()
 
 	instanceName := "pdu-session-" + *port
@@ -187,6 +194,37 @@ func main() {
 		fmt.Println("[DB] Cảnh báo: không có DB_URL, chạy ở chế độ không lưu trữ")
 	}
 
+	// DYNAMIC PORT
+	address := ":" + *port
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		log.Fatalf("Lỗi tạo listener: %v", err)
+	}
+
+	actualPort := listener.Addr().(*net.TCPAddr).Port
+	hostname, _ := os.Hostname()
+
+	instanceID := fmt.Sprintf("pdu-%s-%d", hostname, actualPort)
+	myURL := fmt.Sprintf("http://%s:%d", hostname, actualPort)
+
+	// HEARTBEAT
+	gatewayURL := os.Getenv("GATEWAY_URL")
+	if gatewayURL != "" {
+		go func() {
+			client := &http.Client{Timeout: 2 * time.Second}
+			for {
+				msg := HeartbeatMsg{ID: instanceID, URL: myURL}
+				body, _ := json.Marshal(msg)
+
+				_, err := client.Post(gatewayURL+"/admin/heartbeat", "application/json", bytes.NewBuffer(body))
+				if err != nil {
+					log.Printf("[%s] Lỗi gửi Heartbeat tới Gateway: %v\n", instanceID, err)
+				}
+				time.Sleep(3 * time.Second)
+			}
+		}()
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/nsmf-pdusession/v1/sm-contexts", func(w http.ResponseWriter, r *http.Request) {
@@ -198,10 +236,7 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	address := ":" + *port
-
 	server := &http.Server{
-		Addr:    address,
 		Handler: mux,
 	}
 
@@ -209,6 +244,6 @@ func main() {
 	server.Protocols.SetHTTP1(true)
 	server.Protocols.SetUnencryptedHTTP2(true)
 
-	fmt.Printf("PDU Backend đang chạy tại cổng%s\n", address)
-	log.Fatal(server.ListenAndServe())
+	fmt.Printf("PDU Backend (Instance: %s) đang lắng nghe kết nối tại cổng %d\n", instanceID, actualPort)
+	log.Fatal(server.Serve(listener))
 }

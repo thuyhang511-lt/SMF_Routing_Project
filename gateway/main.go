@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -11,8 +12,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,11 +59,18 @@ func NewTransportPool(poolSize int) *TransportPool {
 
 type BackendPool struct {
 	backends []*algorithm.Backend
-	mutex    sync.Mutex
+	mutex    sync.RWMutex
 	algo     string // "round-robin", "weighted", "load-based"
 
 	lbState *algorithm.LoadBalancerState
 	maglev  *algorithm.Maglev
+
+	registry map[string]time.Time // ghi thoi gian song cuoi cung cua cac PDU
+}
+
+type HeartbeatMsg struct {
+	ID  string `json:"id"`
+	URL string `json:"url"`
 }
 
 var healthCheckClient = &http.Client{
@@ -87,8 +93,8 @@ func (p *BackendPool) buildMaglev() {
 }
 
 func (p *BackendPool) GetNextPeer(bodyBytes []byte) *algorithm.Backend {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
 
 	if p.lbState == nil {
 		p.lbState = &algorithm.LoadBalancerState{}
@@ -125,125 +131,96 @@ func (p *BackendPool) GetNextPeer(bodyBytes []byte) *algorithm.Backend {
 	return lb.Next(healthyBackends, bodyBytes)
 }
 
-func healthCheck(pool *BackendPool) {
-	ticket := time.NewTicker(time.Second * 5)
-	for {
-		<-ticket.C
-
-		type pingResult struct {
-			backend *algorithm.Backend
-			alive   bool
-		}
-		results := make(chan pingResult, len(pool.backends))
-		var wg sync.WaitGroup
-
-		for _, b := range pool.backends {
-			wg.Add(1)
-			go func(b *algorithm.Backend) {
-				defer wg.Done()
-				pingURL := b.URL.String() + "/health"
-				resp, err := healthCheckClient.Get(pingURL)
-
-				alive := false
-				if err == nil && resp.StatusCode == http.StatusOK {
-					alive = true
-				}
-				if resp != nil {
-					resp.Body.Close()
-				}
-				results <- pingResult{backend: b, alive: alive}
-			}(b)
-		}
-		wg.Wait()
-		close(results)
-
-		changed := false
-		pool.mutex.Lock()
-		for r := range results {
-			if r.backend.Alive != r.alive {
-				r.backend.Alive = r.alive
-				changed = true
-				status := "SẬP (DOWN)"
-				if r.alive {
-					status = "SỐNG (UP)"
-				}
-				fmt.Printf("[HealthCheck] Cảnh báo: Backend %s đang %s\n", r.backend.URL.String(), status)
-			}
-		}
-
-		if changed {
-			fmt.Println("[Maglev] Phát hiện thay đổi, đang xây dựng lại bảng Hash...")
-			pool.buildMaglev()
-		}
-		pool.mutex.Unlock()
-	}
-}
-
 func main() {
-	// Khoi tao danh sach backend co gan san Trong so
-	// Uu tien doc tu bien moi truong BACKEND_URLS (vd khi chay trong Docker),
-	// neu khong co thi fallback ve localhost cho moi truong chay local
-	defaultWeights := []int{3, 2, 1}
-	var backendURLs []string
-	if envURLs := os.Getenv("BACKEND_URLS"); envURLs != "" {
-		for _, u := range strings.Split(envURLs, ",") {
-			u = strings.TrimSpace(u)
-			if u != "" {
-				backendURLs = append(backendURLs, u)
-			}
-		}
-	} else {
-		backendURLs = []string{"http://localhost:8081", "http://localhost:8082", "http://localhost:8083"}
-	}
 
-	configs := make([]struct {
-		url    string
-		weight int
-	}, len(backendURLs))
-
-	for i, u := range backendURLs {
-		weight := 1
-		if i < len(defaultWeights) {
-			weight = defaultWeights[i]
-		}
-		configs[i] = struct {
-			url    string
-			weight int
-		}{u, weight}
-	}
-
+	// Khoi tao BackendPool trong
 	pool := &BackendPool{
-		algo:    "round-robin",
-		lbState: &algorithm.LoadBalancerState{},
-		maglev:  &algorithm.Maglev{},
+		backends: make([]*algorithm.Backend, 0),
+		algo:     "round-robin",
+		lbState:  &algorithm.LoadBalancerState{},
+		maglev:   &algorithm.Maglev{},
+		registry: make(map[string]time.Time),
 	}
 
 	// Khoi tao 1 pool gom 8 ket noi
-	sharedTransportPool := NewTransportPool(8)
-
-	// Khoi tao cac Backend cho vao Pool
-	for _, cfg := range configs {
-		parsedUrl, _ := url.Parse(cfg.url)
-
-		proxy := httputil.NewSingleHostReverseProxy(parsedUrl)
-		// Gan TransportPool vao ReverseProxy
-		proxy.Transport = sharedTransportPool
-
-		pool.backends = append(pool.backends, &algorithm.Backend{
-			URL:          parsedUrl,
-			Alive:        true,
-			Weight:       cfg.weight,
-			ReverseProxy: proxy,
-		})
-	}
-
-	// Khoi tao bang Maglev
-	pool.buildMaglev()
-
-	// Goroutine chay ngam Health Check
-	go healthCheck(pool)
-
+	sharedTransportPool := NewTransportPool(100)
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("/admin/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var msg HeartbeatMsg
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+
+		pool.mutex.Lock()
+		defer pool.mutex.Unlock()
+
+		pool.registry[msg.ID] = time.Now()
+
+		exists := false
+		for _, b := range pool.backends {
+			if b.ID == msg.ID {
+				if !b.Alive {
+					fmt.Printf("[Gateway] PDU %s đã SỐNG LẠI tại %s\n", msg.ID, msg.URL)
+				}
+				b.Alive = true
+				exists = true
+				break
+			}
+		}
+
+		if !exists {
+			parsedUrl, _ := url.Parse(msg.URL)
+			proxy := httputil.NewSingleHostReverseProxy(parsedUrl)
+			proxy.Transport = sharedTransportPool
+
+			newBackend := &algorithm.Backend{
+				ID:           msg.ID,
+				URL:          parsedUrl,
+				ReverseProxy: proxy,
+				Weight:       1,
+				Alive:        true,
+			}
+			pool.backends = append(pool.backends, newBackend)
+			fmt.Printf("[Gateway] Phát hiện PDU MỚI gia nhập vòng: %s (%s)\n", msg.ID, msg.URL)
+
+			if pool.algo == "maglev" {
+				pool.buildMaglev()
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			pool.mutex.Lock()
+
+			changed := false
+			now := time.Now()
+			for _, b := range pool.backends {
+				lastSeen, ok := pool.registry[b.ID]
+
+				if ok && now.Sub(lastSeen) > 10*time.Second {
+					if b.Alive {
+						b.Alive = false
+						changed = true
+						fmt.Printf("[Gateway] Cảnh báo: %s ĐÃ CHẾT (Mất kết nối)\n", b.ID)
+					}
+				}
+			}
+
+			if changed && pool.algo == "maglev" {
+				pool.buildMaglev()
+			}
+			pool.mutex.Unlock()
+		}
+	}()
 
 	// API doi thuat toan
 	mux.HandleFunc("/admin/algo", func(w http.ResponseWriter, r *http.Request) {
@@ -264,9 +241,9 @@ func main() {
 		// Doc Body de lay SUPI
 		var bodyBytes []byte
 
-		pool.mutex.Lock()
+		pool.mutex.RLock()
 		currentAlgo := pool.algo
-		pool.mutex.Unlock()
+		pool.mutex.RUnlock()
 
 		if currentAlgo == "maglev" {
 			var err error

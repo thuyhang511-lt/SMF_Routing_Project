@@ -7,7 +7,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -55,9 +55,6 @@ services:
       - pdu_1
       - pdu_2
       - pdu_3
-    environment:
-      # Chuyển hướng traffic xuống các PDU container thay vì localhost
-      - BACKEND_URLS=http://pdu_1:8081,http://pdu_2:8082,http://pdu_3:8083
     #   - GOMAXPROCS=1
     # deploy:
     #   resources:
@@ -71,13 +68,12 @@ services:
   pdu_1:
     build:
       context: ./pdu_backend
-    container_name: smf_pdu_1
-    command: ["-port=8081"]
-    ports:
-      - "8081:8081"
+    # container_name: smf_pdu_1
+    command: ["./pdu_app"]
     environment:
       # Sử dụng hostname 'postgres' do Docker tự động phân giải IP
-      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
+      - GATEWAY_URL=http://gateway:8000
       # - GOMAXPROCS=1
     depends_on:
       postgres:
@@ -94,12 +90,11 @@ services:
   pdu_2:
     build:
       context: ./pdu_backend
-    container_name: smf_pdu_2
-    command: ["-port=8082"]
-    ports:
-      - "8082:8082"
+    # container_name: smf_pdu_2
+    command: ["./pdu_app"]
     environment:
-      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
+      - GATEWAY_URL=http://gateway:8000
     #  - GOMAXPROCS=1
     depends_on:
       postgres:
@@ -116,12 +111,11 @@ services:
   pdu_3:
     build:
       context: ./pdu_backend
-    container_name: smf_pdu_3
-    command: ["-port=8083"]
-    ports:
-      - "8083:8083"
+    # container_name: smf_pdu_3
+    command: ["./pdu_app"]
     environment:
-      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
+      - GATEWAY_URL=http://gateway:8000
     #  - GOMAXPROCS=1
     depends_on:
       postgres:

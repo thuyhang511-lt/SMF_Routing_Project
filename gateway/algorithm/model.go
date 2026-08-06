@@ -17,6 +17,8 @@ type Backend struct {
 
 	// Thuat toan Load-based
 	ActiveRequests int32
+
+	ID string
 }
 
 type LoadBalancer interface {
