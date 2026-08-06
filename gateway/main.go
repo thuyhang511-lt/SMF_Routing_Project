@@ -143,7 +143,7 @@ func main() {
 	}
 
 	// Khoi tao 1 pool gom 8 ket noi
-	sharedTransportPool := NewTransportPool(100)
+	sharedTransportPool := NewTransportPool(8)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/admin/heartbeat", func(w http.ResponseWriter, r *http.Request) {
