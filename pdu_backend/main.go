@@ -47,6 +47,21 @@ type HeartbeatMsg struct {
 var activeRequests int32
 var dbPool *pgxpool.Pool
 
+func getLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "127.0.0.1"
+	}
+	for _, address := range addrs {
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String() // Trả về IP thật (VD: 172.18.0.5)
+			}
+		}
+	}
+	return "127.0.0.1"
+}
+
 // initDB ket noi Postgres va tao bang pdu_sessions neu chua co
 func initDB(dbURL string) (*pgxpool.Pool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -58,8 +73,8 @@ func initDB(dbURL string) (*pgxpool.Pool, error) {
 	}
 
 	// Gioi han so connection cho MOI instance pdu_backend.
-	config.MaxConns = 10
-	config.MinConns = 2
+	config.MaxConns = 100
+	config.MinConns = 10
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
 
@@ -203,9 +218,10 @@ func main() {
 
 	actualPort := listener.Addr().(*net.TCPAddr).Port
 	hostname, _ := os.Hostname()
+	myIP := getLocalIP()
 
 	instanceID := fmt.Sprintf("pdu-%s-%d", hostname, actualPort)
-	myURL := fmt.Sprintf("http://%s:%d", hostname, actualPort)
+	myURL := fmt.Sprintf("http://%s:%d", myIP, actualPort)
 
 	// HEARTBEAT
 	gatewayURL := os.Getenv("GATEWAY_URL")
@@ -216,8 +232,10 @@ func main() {
 				msg := HeartbeatMsg{ID: instanceID, URL: myURL}
 				body, _ := json.Marshal(msg)
 
-				_, err := client.Post(gatewayURL+"/admin/heartbeat", "application/json", bytes.NewBuffer(body))
-				if err != nil {
+				resp, err := client.Post(gatewayURL+"/admin/heartbeat", "application/json", bytes.NewBuffer(body))
+				if err == nil {
+					resp.Body.Close()
+				} else {
 					log.Printf("[%s] Lỗi gửi Heartbeat tới Gateway: %v\n", instanceID, err)
 				}
 				time.Sleep(3 * time.Second)

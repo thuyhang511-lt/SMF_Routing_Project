@@ -129,6 +129,18 @@ services:
     #       cpus: '0.25'
     #       memory: 64M
 
+  load_tester:
+    image: golang:1.26-alpine
+    container_name: smf_load_test
+    working_dir: /app
+    volumes:
+      - ./load_test:/app
+    command: ["go", "run", "main.go"]
+    depends_on:
+      - gateway
+    profiles:
+      - manual_test
+
 volumes:
   postgres_data:
 

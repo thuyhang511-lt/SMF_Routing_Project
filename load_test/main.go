@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	gatewayURL := "http://localhost:8000/nsmf-pdusession/v1/sm-contexts"
+	gatewayURL := "http://smf_gateway:8000"
 
 	numWorkers := 100        // Chay 100 luong dong thoi
 	requestsPerWorker := 500 // Moi luong gui 500 request
