@@ -58,8 +58,8 @@ func initDB(dbURL string) (*pgxpool.Pool, error) {
 	}
 
 	// Gioi han so connection cho MOI instance pdu_backend.
-	config.MaxConns = 10
-	config.MinConns = 2
+	config.MaxConns = 25
+	config.MinConns = 5
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
 
@@ -202,7 +202,11 @@ func main() {
 	}
 
 	actualPort := listener.Addr().(*net.TCPAddr).Port
-	hostname, _ := os.Hostname()
+	// hostname, _ := os.Hostname()
+	hostname := os.Getenv("SELF_HOST")
+	if hostname == "" {
+		hostname, _ = os.Hostname()
+	}
 
 	instanceID := fmt.Sprintf("pdu-%s-%d", hostname, actualPort)
 	myURL := fmt.Sprintf("http://%s:%d", hostname, actualPort)

@@ -2,12 +2,13 @@ services:
   postgres:
     image: postgres:15-alpine
     container_name: smf_postgres
+    network_mode: "host"
     environment:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
-    ports:
-      - "5433:5432"
+    # ports:
+    #   - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -15,14 +16,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '2.0'
-    #       memory: 512M
-    #     reservations:
-    #       cpus: '0.5'
-    #       memory: 256M
+    cpuset: "7"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G   
+        reservations:
+          memory: 256M
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -49,95 +50,113 @@ services:
     build:
       context: ./gateway
     container_name: smf_gateway
-    ports:
-      - "8000:8000"
+    network_mode: "host"
+    # ports:
+    #   - "8000:8000"
     depends_on:
       - pdu_1
       - pdu_2
       - pdu_3
     #   - GOMAXPROCS=1
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '2.0'
-    #       memory: 128M
-    #     reservations:
-    #       cpus: '0.25'
-    #       memory: 64M
+    cpuset: "0,1"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 512M
+        reservations:
+          memory: 128M
 
   pdu_1:
     build:
       context: ./pdu_backend
     # container_name: smf_pdu_1
+    network_mode: "host"
     command: ["./pdu_app"]
     environment:
       # Sử dụng hostname 'postgres' do Docker tự động phân giải IP
-      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}?sslmode=disable
       - GATEWAY_URL=http://gateway:8000
+      - SELF_HOST=localhost
       # - GOMAXPROCS=1
     depends_on:
       postgres:
         condition: service_healthy
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '1.0'
-    #       memory: 128M
-    #     reservations:
-    #       cpus: '0.25'
-    #       memory: 64M
+    cpuset: "2"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          memory: 64M
 
   pdu_2:
     build:
       context: ./pdu_backend
     # container_name: smf_pdu_2
+    network_mode: "host"
     command: ["./pdu_app"]
     environment:
-      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}?sslmode=disable
       - GATEWAY_URL=http://gateway:8000
+      - SELF_HOST=localhost
     #  - GOMAXPROCS=1
     depends_on:
       postgres:
         condition: service_healthy
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '1.0'
-    #       memory: 128M
-    #     reservations:
-    #       cpus: '0.25'
-    #       memory: 64M
+    cpuset: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          memory: 64M
 
   pdu_3:
     build:
       context: ./pdu_backend
     # container_name: smf_pdu_3
+    network_mode: "host"
     command: ["./pdu_app"]
     environment:
-      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}?sslmode=disable
       - GATEWAY_URL=http://gateway:8000
+      - SELF_HOST=localhost
     #  - GOMAXPROCS=1
     depends_on:
       postgres:
         condition: service_healthy
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '1.0'
-    #       memory: 128M
-    #     reservations:
-    #       cpus: '0.25'
-    #       memory: 64M
+    cpuset: "4"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          memory: 64M
 
   load_tester:
     image: golang:1.26-alpine
     container_name: smf_load_test
+    network_mode: "host"
     working_dir: /app
     volumes:
       - ./load_test:/app
+    environment:
+      - GATEWAY_URL=http://localhost:8000
     command: ["go", "run", "main.go"]
     depends_on:
       - gateway
+    cpuset: "5,6"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
+        reservations:
+          memory: 128M
     profiles:
       - manual_test
 

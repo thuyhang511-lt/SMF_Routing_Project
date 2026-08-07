@@ -11,12 +11,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"os"
+
 	"golang.org/x/net/http2"
 )
 
 func main() {
-	gatewayURL := "http://smf_gateway:8000/nsmf-pdusession/v1/sm-contexts"
+	// gatewayURL := "http://smf_gateway:8000/nsmf-pdusession/v1/sm-contexts"
 	// gatewayURL := "http://localhost:8000/nsmf-pdusession/v1/sm-contexts"
+	gatewayBase := os.Getenv("GATEWAY_URL")
+	if gatewayBase == "" {
+		gatewayBase = "http://localhost:8000"
+	}
+	gatewayURL := gatewayBase + "/nsmf-pdusession/v1/sm-contexts"
 
 	numWorkers := 100        // Chay 100 luong dong thoi
 	requestsPerWorker := 500 // Moi luong gui 500 request
