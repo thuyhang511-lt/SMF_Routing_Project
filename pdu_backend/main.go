@@ -10,9 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -39,11 +39,17 @@ type CreateSessionResponse struct {
 	Status       string `json:"status"`
 }
 
+type SessionRecord struct {
+	Req  CreateSessionRequest
+	Resp CreateSessionResponse
+}
+
 type HeartbeatMsg struct {
 	ID  string `json:"id"`
 	URL string `json:"url"`
 }
 
+var sessionQueue = make(chan SessionRecord, 50000)
 var activeRequests int32
 var dbPool *pgxpool.Pool
 
@@ -96,6 +102,65 @@ func initDB(dbURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
+func startDBWorker(pool *pgxpool.Pool, batchSize int, flushInterval time.Duration, workerID int) {
+	go func() {
+		var batch *pgx.Batch
+		batch = &pgx.Batch{}
+
+		ticker := time.NewTicker(flushInterval)
+		defer ticker.Stop()
+
+		flush := func() {
+			if batch.Len() == 0 {
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			br := pool.SendBatch(ctx, batch)
+
+			var errCount int
+			for i := 0; i < batch.Len(); i++ {
+				_, err := br.Exec()
+				if err != nil {
+					errCount++
+				}
+			}
+			br.Close() // dong BatchResults de tra Connection lai Pool
+
+			if errCount > 0 {
+				log.Printf("[Worker %d] Ghi Batch xong nhưng có %d lỗi\n", workerID, errCount)
+			}
+
+			batch = &pgx.Batch{}
+		}
+
+		for {
+			select {
+			case record := <-sessionQueue:
+				query := `INSERT INTO pdu_sessions 
+                    (sm_context_ref, supi, gpsi, pdu_session_id, dnn, sst, sd, serving_nf_id, an_type, handled_by, status) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+
+				batch.Queue(query,
+					record.Resp.SmContextRef, record.Req.Supi, record.Req.Gpsi,
+					record.Req.PduSessionId, record.Req.Dnn, record.Req.SNssai.Sst,
+					record.Req.SNssai.Sd, record.Req.ServingNfId, record.Req.AnType,
+					record.Resp.HandledBy, record.Resp.Status,
+				)
+
+				if batch.Len() >= batchSize {
+					flush()
+				}
+
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+}
+
 // saveSession luu session vao Postgres
 func saveSession(pool *pgxpool.Pool, req CreateSessionRequest, resp CreateSessionResponse) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -125,12 +190,12 @@ func saveSession(pool *pgxpool.Pool, req CreateSessionRequest, resp CreateSessio
 
 func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName string) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		// http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	atomic.AddInt32(&activeRequests, 1)
-	defer atomic.AddInt32(&activeRequests, -1)
+	// atomic.AddInt32(&activeRequests, 1)
+	// defer atomic.AddInt32(&activeRequests, -1)
 
 	// Parse JSON body
 	var req CreateSessionRequest
@@ -160,12 +225,14 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 
 	// Sinh session context va luu vao database
 	if dbPool != nil {
-		if err := saveSession(dbPool, req, response); err != nil {
-			log.Printf("[DB] Lỗi khi lưu session: %v\n", err)
+		select {
+		case sessionQueue <- SessionRecord{Req: req, Resp: response}:
+
+		default:
+			log.Println("[CẢNH BÁO] Hệ thống quá tải, rớt gói tin DB!")
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"status": "ERROR", "cause": "DB_WRITE_FAILED"}`))
-			return
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"status": "ERROR", "cause": "SERVER_OVERLOADED"}`))
 		}
 	}
 
@@ -187,9 +254,15 @@ func main() {
 		if err != nil {
 			log.Fatalf("[DB] Không thể khởi tạo database: %v\n", err)
 		}
-		defer pool.Close()
+		// defer pool.Close()
 		dbPool = pool
 		fmt.Println("[DB] Đã kết nối Postgres và sẵn sàng bảng pdu_sessions")
+
+		numWorkers := 2
+		for i := 1; i <= numWorkers; i++ {
+			startDBWorker(dbPool, 1000, 500*time.Millisecond, i)
+		}
+		fmt.Printf("[DB] Đã khởi chạy %d DB Workers xử lý Asynchronous Write\n", numWorkers)
 	} else {
 		fmt.Println("[DB] Cảnh báo: không có DB_URL, chạy ở chế độ không lưu trữ")
 	}
@@ -237,7 +310,10 @@ func main() {
 	})
 
 	server := &http.Server{
-		Handler: mux,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	server.Protocols = new(http.Protocols)

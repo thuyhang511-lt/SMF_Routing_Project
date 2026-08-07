@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -76,6 +77,7 @@ func main() {
 				resp, err := client.Do(req)
 				if err == nil {
 					resp.Body.Close()
+					io.Copy(io.Discard, resp.Body)
 					if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
 						atomic.AddInt32(&successCount, 1)
 					} else {

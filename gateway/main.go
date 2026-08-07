@@ -28,7 +28,7 @@ type TransportPool struct {
 
 func (tp *TransportPool) NextTransport() http.RoundTripper {
 	next := atomic.AddUint64(&tp.counter, 1)
-	idx := int((next - 1) % uint64(len(tp.transports)))
+	idx := int((next - 1) & uint64(len(tp.transports)-1))
 	return tp.transports[idx]
 }
 
@@ -40,6 +40,10 @@ func (tp *TransportPool) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // Ham khoi tao Pool gom 8 Transport (Client) cho HTTP/2
 func NewTransportPool(poolSize int) *TransportPool {
+	isPowerOfTwo := (poolSize > 0) && ((poolSize & (poolSize - 1)) == 0)
+	if !isPowerOfTwo {
+		log.Fatalf("Lỗi: Kích thước TransportPool (%d) BẮT BUỘC phải là lũy thừa của 2 (ví dụ: 2, 4, 8, 16) để tối ưu hóa CPU.", poolSize)
+	}
 	tp := &TransportPool{
 		transports: make([]http.RoundTripper, poolSize),
 	}
@@ -274,8 +278,11 @@ func main() {
 
 	// Khoi tao HTTP/2 Cleartext Server (theo chuan 3GPP)
 	server := &http.Server{
-		Addr:    ":8000",
-		Handler: mux,
+		Addr:         ":8000",
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// Ho tro HTTP/2 khong ma hoa (h2c) truc tiep tu thu vien chuan
