@@ -61,15 +61,19 @@ func NewTransportPool(poolSize int) *TransportPool {
 	return tp
 }
 
+type RoutingState struct {
+	Algo            string
+	HealthyBackends []*algorithm.Backend
+	Maglev          *algorithm.Maglev
+	LBState         *algorithm.LoadBalancerState
+}
+
 type BackendPool struct {
-	backends []*algorithm.Backend
-	mutex    sync.RWMutex
-	algo     string // "round-robin", "weighted", "load-based"
+	state atomic.Value
 
-	lbState *algorithm.LoadBalancerState
-	maglev  *algorithm.Maglev
-
-	registry map[string]time.Time // ghi thoi gian song cuoi cung cua cac PDU
+	writerMutex sync.Mutex
+	backends    []*algorithm.Backend
+	registry    map[string]time.Time // ghi thoi gian song cuoi cung cua cac PDU
 }
 
 type HeartbeatMsg struct {
@@ -81,58 +85,63 @@ var healthCheckClient = &http.Client{
 	Timeout: 2 * time.Second,
 }
 
-func (p *BackendPool) buildMaglev() {
+func (p *BackendPool) rebuildRoutingState(newAlgo string) {
+	// 1. Load state hiện tại (để lấy LBState cũ, giữ nguyên biến đếm của Round-Robin)
+	oldState := p.state.Load().(*RoutingState)
 
-	if p.maglev == nil {
-		p.maglev = &algorithm.Maglev{}
+	algo := oldState.Algo
+	if newAlgo != "" {
+		algo = newAlgo
 	}
 
+	// 2. Lọc ra danh sách các PDU còn sống
 	var healthy []*algorithm.Backend
 	for _, b := range p.backends {
 		if b.Alive {
 			healthy = append(healthy, b)
 		}
 	}
-	p.maglev.Build(healthy)
+
+	// 3. Chuẩn bị state mới
+	newState := &RoutingState{
+		Algo:            algo,
+		HealthyBackends: healthy,
+		LBState:         oldState.LBState, // Giữ nguyên state của thuật toán cũ
+		Maglev:          oldState.Maglev,  // Tạm giữ bảng băm cũ
+	}
+
+	// 4. SHADOW TABLE: Tính toán Maglev trên RAM ảo (Không hề chặn luồng đọc)
+	if algo == "maglev" {
+		newMaglev := &algorithm.Maglev{}
+		newMaglev.Build(healthy) // Thao tác tốn CPU nhất giờ được chạy độc lập
+		newState.Maglev = newMaglev
+	}
+
+	// 5. TRÁO ĐỔI TRẠNG THÁI (Zero-lock swap)
+	p.state.Store(newState)
 }
 
 func (p *BackendPool) GetNextPeer(bodyBytes []byte) *algorithm.Backend {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
+	// Đọc thẳng state từ RAM bằng Atomic (nhanh tương đương tốc độ ánh sáng)
+	state := p.state.Load().(*RoutingState)
 
-	if p.lbState == nil {
-		p.lbState = &algorithm.LoadBalancerState{}
-	}
-	if p.maglev == nil {
-		p.maglev = &algorithm.Maglev{}
-	}
-
-	// Loc ra danh sach cac backend con SONG
-	var healthyBackends []*algorithm.Backend
-	for _, b := range p.backends {
-		if b.Alive {
-			healthyBackends = append(healthyBackends, b)
-		}
-	}
-
-	if len(healthyBackends) == 0 {
+	if len(state.HealthyBackends) == 0 {
 		return nil
 	}
 
-	// Chon thuat toan
 	var lb algorithm.LoadBalancer
-	switch p.algo {
+	switch state.Algo {
 	case "weighted":
 		lb = &algorithm.Weighted{}
 	case "load-based":
 		lb = &algorithm.LoadBased{}
 	case "maglev":
-		lb = p.maglev
+		lb = state.Maglev
 	default:
-		lb = &algorithm.RoundRobin{State: p.lbState}
+		lb = &algorithm.RoundRobin{State: state.LBState}
 	}
 
-	return lb.Next(healthyBackends, bodyBytes)
+	return lb.Next(state.HealthyBackends, bodyBytes)
 }
 
 func main() {
@@ -140,11 +149,16 @@ func main() {
 	// Khoi tao BackendPool trong
 	pool := &BackendPool{
 		backends: make([]*algorithm.Backend, 0),
-		algo:     "round-robin",
-		lbState:  &algorithm.LoadBalancerState{},
-		maglev:   &algorithm.Maglev{},
 		registry: make(map[string]time.Time),
 	}
+
+	initialState := &RoutingState{
+		Algo:            "round-robin",
+		HealthyBackends: make([]*algorithm.Backend, 0),
+		Maglev:          &algorithm.Maglev{},
+		LBState:         &algorithm.LoadBalancerState{},
+	}
+	pool.state.Store(initialState)
 
 	// Khoi tao 1 pool gom 8 ket noi
 	sharedTransportPool := NewTransportPool(8)
@@ -161,18 +175,21 @@ func main() {
 			return
 		}
 
-		pool.mutex.Lock()
-		defer pool.mutex.Unlock()
+		pool.writerMutex.Lock()
+		defer pool.writerMutex.Unlock()
 
 		pool.registry[msg.ID] = time.Now()
 
 		exists := false
+		changed := false // Biến cờ đánh dấu cần build lại state
+
 		for _, b := range pool.backends {
 			if b.ID == msg.ID {
 				if !b.Alive {
 					fmt.Printf("[Gateway] PDU %s đã SỐNG LẠI tại %s\n", msg.ID, msg.URL)
+					b.Alive = true
+					changed = true // Trạng thái thay đổi (chết -> sống)
 				}
-				b.Alive = true
 				exists = true
 				break
 			}
@@ -192,24 +209,27 @@ func main() {
 			}
 			pool.backends = append(pool.backends, newBackend)
 			fmt.Printf("[Gateway] Phát hiện PDU MỚI gia nhập vòng: %s (%s)\n", msg.ID, msg.URL)
-
-			if pool.algo == "maglev" {
-				pool.buildMaglev()
-			}
+			changed = true // Trạng thái thay đổi (thêm mới)
 		}
+
+		// TÍNH TOÁN LẠI ROUTING STATE NẾU CÓ THAY ĐỔI
+		if changed {
+			pool.rebuildRoutingState("") // Truyền "" để giữ nguyên thuật toán hiện tại
+		}
+
 		w.WriteHeader(http.StatusOK)
 	})
 
 	go func() {
 		for {
 			time.Sleep(5 * time.Second)
-			pool.mutex.Lock()
 
+			pool.writerMutex.Lock()
 			changed := false
 			now := time.Now()
+
 			for _, b := range pool.backends {
 				lastSeen, ok := pool.registry[b.ID]
-
 				if ok && now.Sub(lastSeen) > 10*time.Second {
 					if b.Alive {
 						b.Alive = false
@@ -219,10 +239,10 @@ func main() {
 				}
 			}
 
-			if changed && pool.algo == "maglev" {
-				pool.buildMaglev()
+			if changed {
+				pool.rebuildRoutingState("") // Loại PDU chết khỏi RoutingState
 			}
-			pool.mutex.Unlock()
+			pool.writerMutex.Unlock()
 		}
 	}()
 
@@ -230,11 +250,12 @@ func main() {
 	mux.HandleFunc("/admin/algo", func(w http.ResponseWriter, r *http.Request) {
 		algo := r.URL.Query().Get("name")
 		if algo == "round-robin" || algo == "weighted" || algo == "load-based" || algo == "maglev" {
-			pool.mutex.Lock()
-			pool.algo = algo
-			pool.mutex.Unlock()
+			pool.writerMutex.Lock()
+			pool.rebuildRoutingState(algo) // Tự động tính toán lại
+			pool.writerMutex.Unlock()
+
 			fmt.Printf(">> Đã đổi thuật toán sang: %s\n", algo)
-			w.Write([]byte("Đã đổi thuật toán thành công:" + algo))
+			w.Write([]byte("Đã đổi thuật toán thành công: " + algo))
 		} else {
 			w.Write([]byte("Thuật toán không hợp lệ! Dùng: round-robin, weighted, load-based, maglev"))
 		}
@@ -242,35 +263,31 @@ func main() {
 
 	// API Routing chinh
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Doc Body de lay SUPI
-		var bodyBytes []byte
+		// 1. ĐỌC TRẠNG THÁI (Zero-lock, siêu tốc)
+		state := pool.state.Load().(*RoutingState)
+		currentAlgo := state.Algo
 
-		pool.mutex.RLock()
-		currentAlgo := pool.algo
-		pool.mutex.RUnlock()
-
+		// 2. LẤY HASH KEY (Chỉ đọc Body nếu đang dùng Maglev)
+		var hashKey []byte
 		if currentAlgo == "maglev" {
+			// (Tuỳ chọn: Nếu bạn đã xài gjson thì gọi gjson.GetBytes(bodyBytes, "supi").String() ở đây)
 			var err error
-			bodyBytes, err = io.ReadAll(r.Body)
+			bodyBytes, err := io.ReadAll(r.Body)
 			if err == nil {
-				// Khoi phuc lai Body de Reverse Proxy forward tiep di
+				hashKey = bodyBytes // Hoặc parse SUPI nếu cần chính xác
 				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			}
 		}
 
-		peer := pool.GetNextPeer(bodyBytes)
+		// 3. TÌM PEER
+		peer := pool.GetNextPeer(hashKey)
 		if peer != nil {
-			// TANG bien dem tai (Load) truoc khi forward
 			atomic.AddInt32(&peer.ActiveRequests, 1)
-
-			// fmt.Printf("[Gateway] Algo: %s | Forward request tới %s\n", pool.algo, peer.URL.String())
 			peer.ReverseProxy.ServeHTTP(w, r)
-
-			// GIAM bien dem tai sau khi xu ly xong
 			atomic.AddInt32(&peer.ActiveRequests, -1)
 			return
 		}
-		// Tra ve loi 503 neu khong tim thay backend nao song
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte(`{"status": "ERROR", "cause": "NO_BACKEND_AVAILABLE"}`))
