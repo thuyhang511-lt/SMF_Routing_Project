@@ -130,12 +130,10 @@ services:
     #       memory: 64M
 
   load_tester:
-    image: golang:1.26-alpine
+    build:
+      context: ./load_test
+    image: smf_load_tester:latest
     container_name: smf_load_test
-    working_dir: /app
-    volumes:
-      - ./load_test:/app
-    command: ["go", "run", "main.go"]
     depends_on:
       - gateway
     profiles:
@@ -143,6 +141,3 @@ services:
 
 volumes:
   postgres_data:
-
-# sẽ có những mốc như khoảng 35k request mà đến đó, qua khoảng vài chục giây mà ko có context nào đc ghi vào db
-# khi đó CPU usage cũng rất thấp, khoảng 0-vài%/800%
