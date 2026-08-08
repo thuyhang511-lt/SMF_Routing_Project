@@ -2,7 +2,10 @@ module pdu_backend
 
 go 1.26.3
 
-require github.com/jackc/pgx/v5 v5.10.0
+require (
+	github.com/goccy/go-json v0.10.6
+	github.com/jackc/pgx/v5 v5.10.0
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

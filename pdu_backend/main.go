@@ -3,9 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	json "github.com/goccy/go-json"
 )
 
 type SNssai struct {
@@ -198,8 +200,21 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 	// defer atomic.AddInt32(&activeRequests, -1)
 
 	// Parse JSON body
+	// var req CreateSessionRequest
+	// if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 	w.Header().Set("Content-Type", "application/json")
+	// 	w.WriteHeader(http.StatusBadRequest)
+	// 	w.Write([]byte(`{"status": "ERROR", "cause": "INVALID_JSON"}`))
+	// 	return
+	// }
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	var req CreateSessionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"status": "ERROR", "cause": "INVALID_JSON"}`))
@@ -242,6 +257,9 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 }
 
 func main() {
+	var dummy CreateSessionRequest
+	json.Unmarshal([]byte(`{}`), &dummy)
+
 	port := flag.String("port", "0", "Cổng để chạy server")
 	flag.Parse()
 
