@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -53,6 +54,76 @@ var sessionQueue = make(chan SessionRecord, 50000)
 var activeRequests int32
 var dbPool *pgxpool.Pool
 
+// ---- Static Code Gen parser cho CreateSessionRequest ----
+// Thay vi json.NewDecoder().Decode() (dung reflection, doc struct tag, cap
+// phat qua encoding/json.decodeState cho MOI request), quet truc tiep byte
+// theo dung 7 truong da biet truoc cua CreateSessionRequest. Danh doi: chi
+// dung cho request co dinh dang the nay (gia tri khong chua ky tu " chua
+// escape) - phu hop boi day la API noi bo, khong phai parser JSON tong quat.
+
+// extractJSONString tim pattern "key":" trong body, tra ve chuoi con nam
+// giua 2 dau ngoac kep tiep theo. Tra "" neu khong tim thay key.
+func extractJSONString(body []byte, key string) string {
+	pattern := []byte(`"` + key + `":"`)
+	idx := bytes.Index(body, pattern)
+	if idx == -1 {
+		return ""
+	}
+	start := idx + len(pattern)
+	end := bytes.IndexByte(body[start:], '"')
+	if end == -1 {
+		return ""
+	}
+	return string(body[start : start+end])
+}
+
+// extractJSONInt tim pattern "key": roi doc lien tuc cac chu so ngay sau do
+// (bo qua khoang trang neu co). Tra 0 neu khong tim thay hoac khong phai so.
+func extractJSONInt(body []byte, key string) int {
+	pattern := []byte(`"` + key + `":`)
+	idx := bytes.Index(body, pattern)
+	if idx == -1 {
+		return 0
+	}
+	pos := idx + len(pattern)
+	for pos < len(body) && body[pos] == ' ' {
+		pos++
+	}
+	start := pos
+	for pos < len(body) && body[pos] >= '0' && body[pos] <= '9' {
+		pos++
+	}
+	if start == pos {
+		return 0
+	}
+	n := 0
+	for _, c := range body[start:pos] {
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+// parseCreateSessionRequestFast quet body 1 lan de dung ca 6 truong bac 1 +
+// object long sNssai - khong reflection, khong cap phat struct trung gian
+// cua encoding/json.
+func parseCreateSessionRequestFast(body []byte) CreateSessionRequest {
+	var req CreateSessionRequest
+	req.Supi = extractJSONString(body, "supi")
+	req.Gpsi = extractJSONString(body, "gpsi")
+	req.PduSessionId = extractJSONInt(body, "pduSessionId")
+	req.Dnn = extractJSONString(body, "dnn")
+	req.ServingNfId = extractJSONString(body, "servingNfId")
+	req.AnType = extractJSONString(body, "anType")
+
+	if bytes.Contains(body, []byte(`"sNssai"`)) {
+		req.SNssai = &SNssai{
+			Sst: extractJSONInt(body, "sst"),
+			Sd:  extractJSONString(body, "sd"),
+		}
+	}
+	return req
+}
+
 // initDB ket noi Postgres va tao bang pdu_sessions neu chua co
 func initDB(dbURL string) (*pgxpool.Pool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -64,8 +135,8 @@ func initDB(dbURL string) (*pgxpool.Pool, error) {
 	}
 
 	// Gioi han so connection cho MOI instance pdu_backend.
-	config.MaxConns = 10
-	config.MinConns = 2
+	config.MaxConns = 25
+	config.MinConns = 5
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
 
@@ -197,14 +268,15 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 	// atomic.AddInt32(&activeRequests, 1)
 	// defer atomic.AddInt32(&activeRequests, -1)
 
-	// Parse JSON body
-	var req CreateSessionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Doc toan bo body ra []byte de quet truc tiep (Static Code Gen)
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil || len(bodyBytes) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"status": "ERROR", "cause": "INVALID_JSON"}`))
 		return
 	}
+	req := parseCreateSessionRequestFast(bodyBytes)
 
 	// Validate
 	if req.Supi == "" || req.PduSessionId == 0 || req.Dnn == "" || req.SNssai == nil {
