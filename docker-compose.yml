@@ -16,7 +16,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    cpuset: "6,7"
+    cpuset: "7"
     # deploy:
     #   resources:
     #     limits:
@@ -57,7 +57,7 @@ services:
       - pdu_1
       - pdu_2
       - pdu_3
-    cpuset: "0,1,2,3"
+    cpuset: "0,1,2"
     #   - GOMAXPROCS=1
     # deploy:
     #   resources:
@@ -81,7 +81,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "4"
+    cpuset: "3"
     # deploy:
     #   resources:
     #     limits:
@@ -103,7 +103,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "5"
+    cpuset: "4"
     # deploy:
     #   resources:
     #     limits:
@@ -125,7 +125,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "6"
+    cpuset: "5"
     # deploy:
     #   resources:
     #     limits:
@@ -144,7 +144,7 @@ services:
       - gateway
     profiles:
       - manual_test
-    cpuset: "7"
+    cpuset: "6"
 
 volumes:
   postgres_data:
