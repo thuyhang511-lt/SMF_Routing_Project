@@ -76,7 +76,7 @@ services:
     environment:
       # Sử dụng hostname 'postgres' do Docker tự động phân giải IP
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
-      - GATEWAY_URL=http://gateway:8000
+      - GATEWAY_URL=http://smf_gateway:8000
       # - GOMAXPROCS=1
     depends_on:
       postgres:
@@ -98,7 +98,7 @@ services:
     command: ["./pdu_app"]
     environment:
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
-      - GATEWAY_URL=http://gateway:8000
+      - GATEWAY_URL=http://smf_gateway:8000
     #  - GOMAXPROCS=1
     depends_on:
       postgres:
@@ -120,7 +120,7 @@ services:
     command: ["./pdu_app"]
     environment:
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
-      - GATEWAY_URL=http://gateway:8000
+      - GATEWAY_URL=http://smf_gateway:8000
     #  - GOMAXPROCS=1
     depends_on:
       postgres:
@@ -140,6 +140,8 @@ services:
       context: ./load_test
     image: smf_load_tester:latest
     container_name: smf_load_test
+    environment:
+      - GATEWAY_URL=http://smf_gateway:8000
     depends_on:
       - gateway
     profiles:
