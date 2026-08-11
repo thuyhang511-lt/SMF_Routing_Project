@@ -253,6 +253,9 @@ func main() {
 		if algo == "round-robin" || algo == "weighted" || algo == "load-based" || algo == "maglev" {
 			pool.mutex.Lock()
 			pool.algo = algo
+			if algo == "maglev" {
+				pool.buildMaglev()
+			}
 			pool.mutex.Unlock()
 			fmt.Printf(">> Đã đổi thuật toán sang: %s\n", algo)
 			w.Write([]byte("Đã đổi thuật toán thành công:" + algo))

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -11,117 +10,31 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"sync"
 	"time"
+
+	"pdu_backend/models"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mailru/easyjson"
 )
 
-type SNssai struct {
-	Sst int    `json:"sst"`
-	Sd  string `json:"sd"`
-}
-
-type CreateSessionRequest struct {
-	Supi         string  `json:"supi"`
-	Gpsi         string  `json:"gpsi"`
-	PduSessionId int     `json:"pduSessionId"`
-	Dnn          string  `json:"dnn"`
-	SNssai       *SNssai `json:"sNssai"`
-	ServingNfId  string  `json:"servingNfId"`
-	AnType       string  `json:"anType"`
-}
-
-type CreateSessionResponse struct {
-	SmContextRef string `json:"smContextRef"`
-	Supi         string `json:"supi"`
-	PduSessionId int    `json:"pduSessionId"`
-	HandledBy    string `json:"handledBy"`
-	Status       string `json:"status"`
-}
-
 type SessionRecord struct {
-	Req  CreateSessionRequest
-	Resp CreateSessionResponse
-}
-
-type HeartbeatMsg struct {
-	ID  string `json:"id"`
-	URL string `json:"url"`
+	Req  models.CreateSessionRequest
+	Resp models.CreateSessionResponse
 }
 
 var sessionQueue = make(chan SessionRecord, 50000)
 var activeRequests int32
 var dbPool *pgxpool.Pool
 
-// ---- Static Code Gen parser cho CreateSessionRequest ----
-// Thay vi json.NewDecoder().Decode() (dung reflection, doc struct tag, cap
-// phat qua encoding/json.decodeState cho MOI request), quet truc tiep byte
-// theo dung 7 truong da biet truoc cua CreateSessionRequest. Danh doi: chi
-// dung cho request co dinh dang the nay (gia tri khong chua ky tu " chua
-// escape) - phu hop boi day la API noi bo, khong phai parser JSON tong quat.
-
-// extractJSONString tim pattern "key":" trong body, tra ve chuoi con nam
-// giua 2 dau ngoac kep tiep theo. Tra "" neu khong tim thay key.
-func extractJSONString(body []byte, key string) string {
-	pattern := []byte(`"` + key + `":"`)
-	idx := bytes.Index(body, pattern)
-	if idx == -1 {
-		return ""
-	}
-	start := idx + len(pattern)
-	end := bytes.IndexByte(body[start:], '"')
-	if end == -1 {
-		return ""
-	}
-	return string(body[start : start+end])
-}
-
-// extractJSONInt tim pattern "key": roi doc lien tuc cac chu so ngay sau do
-// (bo qua khoang trang neu co). Tra 0 neu khong tim thay hoac khong phai so.
-func extractJSONInt(body []byte, key string) int {
-	pattern := []byte(`"` + key + `":`)
-	idx := bytes.Index(body, pattern)
-	if idx == -1 {
-		return 0
-	}
-	pos := idx + len(pattern)
-	for pos < len(body) && body[pos] == ' ' {
-		pos++
-	}
-	start := pos
-	for pos < len(body) && body[pos] >= '0' && body[pos] <= '9' {
-		pos++
-	}
-	if start == pos {
-		return 0
-	}
-	n := 0
-	for _, c := range body[start:pos] {
-		n = n*10 + int(c-'0')
-	}
-	return n
-}
-
-// parseCreateSessionRequestFast quet body 1 lan de dung ca 6 truong bac 1 +
-// object long sNssai - khong reflection, khong cap phat struct trung gian
-// cua encoding/json.
-func parseCreateSessionRequestFast(body []byte) CreateSessionRequest {
-	var req CreateSessionRequest
-	req.Supi = extractJSONString(body, "supi")
-	req.Gpsi = extractJSONString(body, "gpsi")
-	req.PduSessionId = extractJSONInt(body, "pduSessionId")
-	req.Dnn = extractJSONString(body, "dnn")
-	req.ServingNfId = extractJSONString(body, "servingNfId")
-	req.AnType = extractJSONString(body, "anType")
-
-	if bytes.Contains(body, []byte(`"sNssai"`)) {
-		req.SNssai = &SNssai{
-			Sst: extractJSONInt(body, "sst"),
-			Sd:  extractJSONString(body, "sd"),
-		}
-	}
-	return req
+var pduBufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 4096)
+		return &buf
+	},
 }
 
 // initDB ket noi Postgres va tao bang pdu_sessions neu chua co
@@ -232,33 +145,6 @@ func startDBWorker(pool *pgxpool.Pool, batchSize int, flushInterval time.Duratio
 	}()
 }
 
-// saveSession luu session vao Postgres
-func saveSession(pool *pgxpool.Pool, req CreateSessionRequest, resp CreateSessionResponse) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	insertSQL := `
-	INSERT INTO pdu_sessions
-		(sm_context_ref, supi, gpsi, pdu_session_id, dnn, sst, sd, serving_nf_id, an_type, handled_by, status)
-	VALUES
-		($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
-
-	_, err := pool.Exec(ctx, insertSQL,
-		resp.SmContextRef,
-		req.Supi,
-		req.Gpsi,
-		req.PduSessionId,
-		req.Dnn,
-		req.SNssai.Sst,
-		req.SNssai.Sd,
-		req.ServingNfId,
-		req.AnType,
-		resp.HandledBy,
-		resp.Status,
-	)
-	return err
-}
-
 func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName string) {
 	if r.Method != http.MethodPost {
 		// http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -268,15 +154,27 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 	// atomic.AddInt32(&activeRequests, 1)
 	// defer atomic.AddInt32(&activeRequests, -1)
 
-	// Doc toan bo body ra []byte de quet truc tiep (Static Code Gen)
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil || len(bodyBytes) == 0 {
+	bufPtr := pduBufferPool.Get().(*[]byte)
+	buf := *bufPtr
+	buf = buf[:cap(buf)]
+	defer pduBufferPool.Put(bufPtr)
+
+	n, err := r.Body.Read(buf)
+	if err != nil && err != io.EOF {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"status": "ERROR", "cause": "INVALID_JSON"}`))
+		w.Write([]byte(`{"status": "ERROR", "cause": "READ_BODY_FAILED"}`))
 		return
 	}
-	req := parseCreateSessionRequestFast(bodyBytes)
+	bodyBytes := buf[:n]
+
+	var req models.CreateSessionRequest
+	if err := req.UnmarshalJSON(bodyBytes); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"status": "ERROR", "cause": "INVALID_JSON_FORMAT"}`))
+		return
+	}
 
 	// Validate
 	if req.Supi == "" || req.PduSessionId == 0 || req.Dnn == "" || req.SNssai == nil {
@@ -287,8 +185,8 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 	}
 
 	// Tra response ve gateway
-	response := CreateSessionResponse{
-		SmContextRef: fmt.Sprintf("http://gw/nsmf-pdusession/v1/sm-contexts/ctx-%d", req.PduSessionId),
+	response := models.CreateSessionResponse{
+		SmContextRef: "http://gw/nsmf-pdusession/v1/sm-contexts/ctx-%d" + strconv.Itoa(req.PduSessionId), // fmt.Sprintf("http://gw/nsmf-pdusession/v1/sm-contexts/ctx-%d", req.PduSessionId),
 		Supi:         req.Supi,
 		PduSessionId: req.PduSessionId,
 		HandledBy:    instanceName,
@@ -305,12 +203,13 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
 			w.Write([]byte(`{"status": "ERROR", "cause": "SERVER_OVERLOADED"}`))
+			return
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(response)
+	_, _ = easyjson.MarshalToWriter(&response, w)
 }
 
 func main() {
@@ -358,13 +257,15 @@ func main() {
 		go func() {
 			client := &http.Client{Timeout: 2 * time.Second}
 			for {
-				msg := HeartbeatMsg{ID: instanceID, URL: myURL}
-				body, _ := json.Marshal(msg)
-
-				_, err := client.Post(gatewayURL+"/admin/heartbeat", "application/json", bytes.NewBuffer(body))
-				if err != nil {
-					log.Printf("[%s] Lỗi gửi Heartbeat tới Gateway: %v\n", instanceID, err)
+				msg := models.HeartbeatMsg{ID: instanceID, URL: myURL}
+				body, err := msg.MarshalJSON()
+				if err == nil {
+					_, err := client.Post(gatewayURL+"/admin/heartbeat", "application/json", bytes.NewBuffer(body))
+					if err != nil {
+						log.Printf("[%s] Lỗi gửi Heartbeat tới Gateway: %v\n", instanceID, err)
+					}
 				}
+
 				time.Sleep(3 * time.Second)
 			}
 		}()
