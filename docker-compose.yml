@@ -16,15 +16,15 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    cpuset: "7"
+    cpuset: "0"
     # deploy:
     #   resources:
     #     limits:
-    #       cpus: '2.0'
+    #       cpus: '0.2'
     #       memory: 512M
-    #     reservations:
-    #       cpus: '0.5'
-    #       memory: 256M
+        # reservations:
+        #   cpus: '0.5'
+        #   memory: 256M
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -38,6 +38,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    cpuset: "0"
     # deploy:
     #   resources:
     #     limits:
@@ -57,96 +58,105 @@ services:
       - pdu_1
       - pdu_2
       - pdu_3
-    cpuset: "0,1,2"
-    #   - GOMAXPROCS=1
+    cpuset: "0"
+    network_mode: "host"
+    environment:
+      - GOMAXPROCS=1
+      - GOGC=1000
     # deploy:
     #   resources:
     #     limits:
-    #       cpus: '2.0'
+    #       cpus: '0.5'
     #       memory: 128M
-    #     reservations:
-    #       cpus: '0.25'
-    #       memory: 64M
+        # reservations:
+        #   cpus: '0.25'
+        #   memory: 64M
 
   pdu_1:
     build:
       context: ./pdu_backend
     # container_name: smf_pdu_1
     command: ["./pdu_app"]
-    environment:
-      # Sử dụng hostname 'postgres' do Docker tự động phân giải IP
-      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
-      - GATEWAY_URL=http://smf_gateway:8000
-      # - GOMAXPROCS=1
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "3"
+    cpuset: "0"
+    network_mode: "host"
+    environment:
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5433/${POSTGRES_DB}?sslmode=disable
+      - GATEWAY_URL=http://127.0.0.1:8000
+      - GOMAXPROCS=1
+      - GOGC=1000
     # deploy:
     #   resources:
     #     limits:
-    #       cpus: '1.0'
+    #       cpus: '0.1'
     #       memory: 128M
-    #     reservations:
-    #       cpus: '0.25'
-    #       memory: 64M
+        # reservations:
+        #   cpus: '0.25'
+        #   memory: 64M
 
   pdu_2:
     build:
       context: ./pdu_backend
     # container_name: smf_pdu_2
     command: ["./pdu_app"]
-    environment:
-      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
-      - GATEWAY_URL=http://smf_gateway:8000
-    #  - GOMAXPROCS=1
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "4"
+    cpuset: "0"
+    network_mode: "host"
+    environment:
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5433/${POSTGRES_DB}?sslmode=disable
+      - GATEWAY_URL=http://127.0.0.1:8000
+      - GOMAXPROCS=1
+      - GOGC=1000
     # deploy:
     #   resources:
     #     limits:
-    #       cpus: '1.0'
+    #       cpus: '0.1'
     #       memory: 128M
-    #     reservations:
-    #       cpus: '0.25'
-    #       memory: 64M
+        # reservations:
+        #   cpus: '0.25'
+        #   memory: 64M
 
   pdu_3:
     build:
       context: ./pdu_backend
     # container_name: smf_pdu_3
     command: ["./pdu_app"]
-    environment:
-      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&pool_max_conns=100
-      - GATEWAY_URL=http://smf_gateway:8000
-    #  - GOMAXPROCS=1
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "5"
+    cpuset: "0"
+    network_mode: "host"
+    environment:
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5433/${POSTGRES_DB}?sslmode=disable
+      - GATEWAY_URL=http://127.0.0.1:8000
+      - GOMAXPROCS=1
+      - GOGC=1000
     # deploy:
     #   resources:
     #     limits:
-    #       cpus: '1.0'
+    #       cpus: '0.1'
     #       memory: 128M
-    #     reservations:
-    #       cpus: '0.25'
-    #       memory: 64M
+        # reservations:
+        #   cpus: '0.25'
+        #   memory: 64M
 
   load_tester:
     build:
       context: ./load_test
     image: smf_load_tester:latest
     container_name: smf_load_test
+    network_mode: "host"
     environment:
-      - GATEWAY_URL=http://smf_gateway:8000
+      - GATEWAY_URL=http://127.0.0.1:8000
     depends_on:
       - gateway
     profiles:
       - manual_test
-    cpuset: "6"
+    cpuset: "1"
 
 volumes:
   postgres_data:
