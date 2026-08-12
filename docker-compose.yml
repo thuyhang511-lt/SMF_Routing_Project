@@ -38,7 +38,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "0"
+    cpuset: "1"
     # deploy:
     #   resources:
     #     limits:
@@ -58,7 +58,7 @@ services:
       - pdu_1
       - pdu_2
       - pdu_3
-    cpuset: "0"
+    cpuset: "2"
     network_mode: "host"
     environment:
       - GOMAXPROCS=1
@@ -80,7 +80,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "0"
+    cpuset: "3"
     network_mode: "host"
     environment:
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5433/${POSTGRES_DB}?sslmode=disable
@@ -104,7 +104,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "0"
+    cpuset: "4"
     network_mode: "host"
     environment:
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5433/${POSTGRES_DB}?sslmode=disable
@@ -128,7 +128,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    cpuset: "0"
+    cpuset: "5"
     network_mode: "host"
     environment:
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5433/${POSTGRES_DB}?sslmode=disable
@@ -156,7 +156,7 @@ services:
       - gateway
     profiles:
       - manual_test
-    cpuset: "1"
+    cpuset: "6"
 
 volumes:
   postgres_data:
