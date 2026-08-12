@@ -285,7 +285,7 @@ func main() {
 
 		peer := pool.GetNextPeer(currentAlgo, healthyBackends, bodyBytes)
 		if peer != nil {
-			if currentAlgo == "maglev" {
+			if currentAlgo == "load-based" {
 				// TANG bien dem tai (Load) truoc khi forward
 				atomic.AddInt32(&peer.ActiveRequests, 1)
 
