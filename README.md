@@ -108,6 +108,7 @@ SMF_Routing_Project/
 │   ├── algorithm/      # 4 thuật toán: round_robin, weighted_round_robin, load_based, consistent_hash (Maglev)
 │   └── main.go
 ├── pdu_backend/         # PDU Session backend (chạy 3 instance)
+│   ├── models/         # struct request/response + models_easyjson.go (code sinh sẵn)
 │   └── main.go
 ├── load_test/           # Công cụ kiểm thử tải bằng goroutine
 │   └── main.go
@@ -116,17 +117,65 @@ SMF_Routing_Project/
 └── README.md
 ```
 
+> `pdu_backend/models/models_easyjson.go` là code marshal/unmarshal JSON do
+> [easyjson](https://github.com/mailru/easyjson) sinh ra và **được commit sẵn**
+> để `docker compose build` / `go build` chạy được ngay từ bản clone sạch (không
+> cần bước code-gen). Khi đổi struct trong `models.go`, sinh lại bằng:
+>
+> ```bash
+> cd pdu_backend && go generate ./...
+> ```
+
 ## Kiểm thử tải
+
+Chạy bằng Docker (cùng ràng buộc CPU với hệ thống — khuyến nghị để benchmark):
+
+```bash
+docker compose --profile manual_test run --rm load_tester
+```
+
+Hoặc chạy trực tiếp:
 
 ```bash
 cd load_test
 go run main.go
 ```
 
-Công cụ gửi đồng thời nhiều goroutine tới Gateway (mặc định 100 worker × 500 request), in ra tổng số request, tỉ lệ lỗi, độ trễ trung bình, và phân phối theo từng PDU instance — dùng để xác nhận thuật toán routing đang chọn đang hoạt động đúng.
+Công cụ gửi đồng thời 100 worker × 500 = 50.000 request tới Gateway, in ra tổng số request thành công/lỗi, thời gian hoàn thành và **throughput (TPS)** end-to-end (đã bao gồm ghi DB).
+
+## Hiệu năng & tối ưu (benchmark single-core)
+
+Hệ thống được benchmark ở chế độ **mỗi service ghim 1 core** (`cpuset` + `GOMAXPROCS=1` trong `docker-compose.yml`) nhằm đo throughput trên một lõi. Phép đo là TPS end-to-end của `load_test` (client → gateway → 3 backend → Postgres, có ghi DB).
+
+### Kết quả (1 core/service)
+
+| Trạng thái | TPS | Ghi chú |
+|---|---|---|
+| Trước tối ưu | ~5.5k | 0 lỗi |
+| Sau tối ưu | ~6.1k | +10%, 0 lỗi, 50k request ghi DB đầy đủ |
+
+**Nút cổ chai là gateway** — nó gom toàn bộ traffic và bão hoà ~100% một core, trong khi mỗi backend chỉ ~37% và Postgres ~10%. CPU profile cho thấy core chủ yếu tiêu vào **syscall I/O (~40%)** và **scheduler/timer runtime (~27%)**, còn logic routing + reverse proxy chỉ ~7%. Đây là chi phí *cấu trúc* của một reverse proxy h2c chạy trên đúng 1 lõi, không giảm thêm được bằng code.
+
+Các tối ưu đã áp dụng cho gateway (branch `perf/single-core-15k`):
+
+- Routing hot-path đọc trạng thái qua `atomic.Pointer` snapshot thay cho `RWMutex.RLock` mỗi request.
+- Bỏ Read/Write deadline theo từng request (chỉ giữ `IdleTimeout`) để cắt timer churn của scheduler.
+- Dùng **1 kết nối h2c/backend** (thay vì 8) để các HTTP/2 frame gộp chung, giảm số lần ghi socket. (Thử HTTP/1.1 cho hop này thì **chậm hơn** — mỗi request cần 1 kết nối riêng, không gộp được frame.)
+
+### Mở rộng theo core
+
+Cùng binary đó đạt **~14–15k TPS khi gateway được cấp 3 core** (`GOMAXPROCS=3`) — throughput scale gần tuyến tính theo số core. Vì vậy mốc **15k req/s cần cấp cho gateway nhiều hơn 1 core**; không đạt được bằng tối ưu code trong giới hạn 1 core/service.
+
+### Sửa lỗi đi kèm
+
+- `smContextRef` bị dính literal `%d` (còn sót sau khi bỏ `fmt.Sprintf`) → tạo ref sai kiểu `ctx-%d5`; nay dựng chuỗi bằng `strconv` (đã verify 200k bản ghi, 0 ref lỗi).
+- `CREATE TABLE IF NOT EXISTS` bị race khi 3 backend khởi động cùng lúc trên DB trống (SQLSTATE 23505 trong catalog Postgres) làm 2/3 backend `log.Fatalf`; nay retry để khi một instance thắng race thì `IF NOT EXISTS` trở thành no-op.
+- Data race trên `Weighted.CurrentWeight` (thuật toán Weighted Round Robin ghi state chia sẻ mà không khoá) → được serialize bằng mutex của pool.
+- Repo không build được từ bản clone sạch do `models_easyjson.go` bị gitignore mà Dockerfile không có bước sinh code → nay commit file sinh sẵn + thêm `//go:generate`.
 
 ## Hạn chế đã biết
 
+- Trên ràng buộc 1 core/service, throughput gateway trần khoảng **~6k req/s** (bão hoà bởi I/O + runtime của Go trên một lõi); muốn cao hơn phải cấp thêm core cho gateway.
 - Chưa có graceful shutdown (xử lý `SIGTERM`) cho Gateway và PDU backend.
 - Mới kiểm thử ở quy mô 3 PDU instance, chưa test ở quy mô lớn hơn (10-20 instance).
 - README này không thay thế tài liệu thiết kế chi tiết — xem thêm báo cáo project (nếu có) để biết đầy đủ về từng thuật toán và các sự cố đã gặp trong quá trình phát triển.
