@@ -70,6 +70,8 @@ type BackendPool struct {
 	maglev  *algorithm.Maglev
 
 	registry map[string]time.Time // ghi thoi gian song cuoi cung cua cac PDU
+
+	healthyCache []*algorithm.Backend
 }
 
 type HeartbeatMsg struct {
@@ -116,32 +118,23 @@ func (p *BackendPool) buildMaglev() {
 	p.maglev.Build(healthy)
 }
 
-func (p *BackendPool) GetNextPeer(bodyBytes []byte) *algorithm.Backend {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-
-	if p.lbState == nil {
-		p.lbState = &algorithm.LoadBalancerState{}
-	}
-	if p.maglev == nil {
-		p.maglev = &algorithm.Maglev{}
-	}
-
-	// Loc ra danh sach cac backend con SONG
-	var healthyBackends []*algorithm.Backend
+func (p *BackendPool) rebuildHealthyCache() {
+	cache := make([]*algorithm.Backend, 0, len(p.backends))
 	for _, b := range p.backends {
 		if b.Alive {
-			healthyBackends = append(healthyBackends, b)
+			cache = append(cache, b)
 		}
 	}
+	p.healthyCache = cache
+}
 
+func (p *BackendPool) GetNextPeer(algo string, healthyBackends []*algorithm.Backend, bodyBytes []byte) *algorithm.Backend {
 	if len(healthyBackends) == 0 {
 		return nil
 	}
 
-	// Chon thuat toan
 	var lb algorithm.LoadBalancer
-	switch p.algo {
+	switch algo {
 	case "weighted":
 		lb = &algorithm.Weighted{}
 	case "load-based":
@@ -186,13 +179,15 @@ func main() {
 
 		pool.registry[msg.ID] = time.Now()
 
+		changed := false
 		exists := false
 		for _, b := range pool.backends {
 			if b.ID == msg.ID {
 				if !b.Alive {
 					fmt.Printf("[Gateway] PDU %s đã SỐNG LẠI tại %s\n", msg.ID, msg.URL)
+					b.Alive = true
+					changed = true
 				}
-				b.Alive = true
 				exists = true
 				break
 			}
@@ -214,6 +209,11 @@ func main() {
 			pool.backends = append(pool.backends, newBackend)
 			fmt.Printf("[Gateway] Phát hiện PDU MỚI gia nhập vòng: %s (%s)\n", msg.ID, msg.URL)
 
+			changed = true
+		}
+
+		if changed {
+			pool.rebuildHealthyCache()
 			if pool.algo == "maglev" {
 				pool.buildMaglev()
 			}
@@ -271,6 +271,7 @@ func main() {
 
 		pool.mutex.RLock()
 		currentAlgo := pool.algo
+		healthyBackends := pool.healthyCache
 		pool.mutex.RUnlock()
 
 		if currentAlgo == "maglev" {
@@ -282,16 +283,20 @@ func main() {
 			}
 		}
 
-		peer := pool.GetNextPeer(bodyBytes)
+		peer := pool.GetNextPeer(currentAlgo, healthyBackends, bodyBytes)
 		if peer != nil {
-			// TANG bien dem tai (Load) truoc khi forward
-			atomic.AddInt32(&peer.ActiveRequests, 1)
+			if currentAlgo == "maglev" {
+				// TANG bien dem tai (Load) truoc khi forward
+				atomic.AddInt32(&peer.ActiveRequests, 1)
 
-			// fmt.Printf("[Gateway] Algo: %s | Forward request tới %s\n", pool.algo, peer.URL.String())
-			peer.ReverseProxy.ServeHTTP(w, r)
+				// fmt.Printf("[Gateway] Algo: %s | Forward request tới %s\n", pool.algo, peer.URL.String())
+				peer.ReverseProxy.ServeHTTP(w, r)
 
-			// GIAM bien dem tai sau khi xu ly xong
-			atomic.AddInt32(&peer.ActiveRequests, -1)
+				// GIAM bien dem tai sau khi xu ly xong
+				atomic.AddInt32(&peer.ActiveRequests, -1)
+			} else {
+				peer.ReverseProxy.ServeHTTP(w, r)
+			}
 			return
 		}
 		// Tra ve loi 503 neu khong tim thay backend nao song
