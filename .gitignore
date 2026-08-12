@@ -11,7 +11,9 @@ pdu_app
 *.out
 /gateway/gateway_app
 /pdu_backend/pdu_app
-/pdu_backend/models/models_easyjson.go
+# NOTE: models_easyjson.go is generated (easyjson) but committed on purpose so
+# `docker compose build` / `go build` work from a clean checkout with no extra
+# code-generation step. Regenerate with `go generate ./...` in pdu_backend.
 
 # ==== Go module cache / vendor (nếu có) ====
 vendor/

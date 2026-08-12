@@ -33,12 +33,12 @@ func (tp *TransportPool) NextTransport() http.RoundTripper {
 }
 
 func (tp *TransportPool) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Lay 1 transport ranh roi tu Pool de xu ly request nay
+	// Grab a free transport from the pool to serve this request.
 	transport := tp.NextTransport()
 	return transport.RoundTrip(req)
 }
 
-// Ham khoi tao Pool gom 8 Transport (Client) cho HTTP/2
+// NewTransportPool builds a pool of h2c transports (clients).
 func NewTransportPool(poolSize int) *TransportPool {
 	isPowerOfTwo := (poolSize > 0) && ((poolSize & (poolSize - 1)) == 0)
 	if !isPowerOfTwo {
@@ -61,17 +61,76 @@ func NewTransportPool(poolSize int) *TransportPool {
 	return tp
 }
 
+// routeSnapshot is an immutable view of the routing state. The request hot
+// path loads it with a single atomic load (no lock); writers (heartbeat,
+// health checker, algo switch) publish a brand-new snapshot under the pool
+// mutex. This replaces the per-request RWMutex.RLock, which was the dominant
+// gateway overhead when every request contended on the same lock.
+type routeSnapshot struct {
+	algo    string
+	healthy []*algorithm.Backend
+	maglev  *algorithm.Maglev // non-nil only when algo == "maglev"
+}
+
 type BackendPool struct {
+	// Writer-side state, guarded by mutex. Never read on the hot path.
+	mutex    sync.Mutex
 	backends []*algorithm.Backend
-	mutex    sync.RWMutex
-	algo     string // "round-robin", "weighted", "load-based"
+	algo     string
+	registry map[string]time.Time // last-seen time per PDU instance
 
-	lbState *algorithm.LoadBalancerState
-	maglev  *algorithm.Maglev
+	lbState *algorithm.LoadBalancerState // round-robin counter (atomic), stable pointer
 
-	registry map[string]time.Time // ghi thoi gian song cuoi cung cua cac PDU
+	// Lock-free routing snapshot read by every request.
+	snap atomic.Pointer[routeSnapshot]
+}
 
-	healthyCache []*algorithm.Backend
+// publish rebuilds the lock-free routing snapshot from the current backend
+// set. The caller MUST hold p.mutex. Writers are rare (heartbeats every 3s,
+// health check every 5s, manual algo switch), so the cost of rebuilding the
+// healthy slice and the maglev table here is off the hot path.
+func (p *BackendPool) publish() {
+	healthy := make([]*algorithm.Backend, 0, len(p.backends))
+	for _, b := range p.backends {
+		if b.Alive {
+			healthy = append(healthy, b)
+		}
+	}
+
+	var mg *algorithm.Maglev
+	if p.algo == "maglev" {
+		mg = &algorithm.Maglev{}
+		mg.Build(healthy)
+	}
+
+	p.snap.Store(&routeSnapshot{
+		algo:    p.algo,
+		healthy: healthy,
+		maglev:  mg,
+	})
+}
+
+// pick chooses a backend from an already-loaded snapshot. It performs no
+// locking; the round-robin counter and load-based counters are atomic, and
+// the weighted algorithm serializes itself via lbState.Mutex.
+func (p *BackendPool) pick(s *routeSnapshot, bodyBytes []byte) *algorithm.Backend {
+	if len(s.healthy) == 0 {
+		return nil
+	}
+
+	var lb algorithm.LoadBalancer
+	switch s.algo {
+	case "weighted":
+		lb = &algorithm.Weighted{Mu: &p.lbState.Mutex}
+	case "load-based":
+		lb = &algorithm.LoadBased{}
+	case "maglev":
+		lb = s.maglev
+	default:
+		lb = &algorithm.RoundRobin{State: p.lbState}
+	}
+
+	return lb.Next(s.healthy, bodyBytes)
 }
 
 type HeartbeatMsg struct {
@@ -94,73 +153,29 @@ func (p *proxyBufferPool) Put(b []byte) {
 var sharedBufferPool = &proxyBufferPool{
 	pool: sync.Pool{
 		New: func() interface{} {
-			return make([]byte, 32*1024) // 32KB chuẩn của ReverseProxy
+			return make([]byte, 32*1024) // ReverseProxy's default 32KB
 		},
 	},
 }
 
-var healthCheckClient = &http.Client{
-	Timeout: 2 * time.Second,
-}
-
-func (p *BackendPool) buildMaglev() {
-
-	if p.maglev == nil {
-		p.maglev = &algorithm.Maglev{}
-	}
-
-	var healthy []*algorithm.Backend
-	for _, b := range p.backends {
-		if b.Alive {
-			healthy = append(healthy, b)
-		}
-	}
-	p.maglev.Build(healthy)
-}
-
-func (p *BackendPool) rebuildHealthyCache() {
-	cache := make([]*algorithm.Backend, 0, len(p.backends))
-	for _, b := range p.backends {
-		if b.Alive {
-			cache = append(cache, b)
-		}
-	}
-	p.healthyCache = cache
-}
-
-func (p *BackendPool) GetNextPeer(algo string, healthyBackends []*algorithm.Backend, bodyBytes []byte) *algorithm.Backend {
-	if len(healthyBackends) == 0 {
-		return nil
-	}
-
-	var lb algorithm.LoadBalancer
-	switch algo {
-	case "weighted":
-		lb = &algorithm.Weighted{}
-	case "load-based":
-		lb = &algorithm.LoadBased{}
-	case "maglev":
-		lb = p.maglev
-	default:
-		lb = &algorithm.RoundRobin{State: p.lbState}
-	}
-
-	return lb.Next(healthyBackends, bodyBytes)
-}
-
 func main() {
 
-	// Khoi tao BackendPool trong
+	// Initialize an empty BackendPool.
 	pool := &BackendPool{
 		backends: make([]*algorithm.Backend, 0),
 		algo:     "round-robin",
 		lbState:  &algorithm.LoadBalancerState{},
-		maglev:   &algorithm.Maglev{},
 		registry: make(map[string]time.Time),
 	}
+	// Publish an initial (empty) snapshot so the hot path never sees nil.
+	pool.publish()
 
-	// Khoi tao 1 pool gom 8 ket noi
-	sharedTransportPool := NewTransportPool(8)
+	// Outbound (gateway -> backend) h2c transports. Fewer transports mean fewer
+	// physical connections per backend, so more streams share one HTTP/2 write
+	// loop and their frames coalesce into fewer socket writes (syscalls were
+	// ~40% of the core in the profile). h2c also beat HTTP/1.1 here because H1
+	// needs one connection per in-flight request and cannot coalesce.
+	sharedTransport := NewTransportPool(1)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/admin/heartbeat", func(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +211,7 @@ func main() {
 		if !exists {
 			parsedUrl, _ := url.Parse(msg.URL)
 			proxy := httputil.NewSingleHostReverseProxy(parsedUrl)
-			proxy.Transport = sharedTransportPool
+			proxy.Transport = sharedTransport
 			proxy.BufferPool = sharedBufferPool
 
 			newBackend := &algorithm.Backend{
@@ -213,10 +228,7 @@ func main() {
 		}
 
 		if changed {
-			pool.rebuildHealthyCache()
-			if pool.algo == "maglev" {
-				pool.buildMaglev()
-			}
+			pool.publish()
 		}
 		w.WriteHeader(http.StatusOK)
 	})
@@ -240,22 +252,20 @@ func main() {
 				}
 			}
 
-			if changed && pool.algo == "maglev" {
-				pool.buildMaglev()
+			if changed {
+				pool.publish()
 			}
 			pool.mutex.Unlock()
 		}
 	}()
 
-	// API doi thuat toan
+	// API to switch the active algorithm at runtime.
 	mux.HandleFunc("/admin/algo", func(w http.ResponseWriter, r *http.Request) {
 		algo := r.URL.Query().Get("name")
 		if algo == "round-robin" || algo == "weighted" || algo == "load-based" || algo == "maglev" {
 			pool.mutex.Lock()
 			pool.algo = algo
-			if algo == "maglev" {
-				pool.buildMaglev()
-			}
+			pool.publish()
 			pool.mutex.Unlock()
 			fmt.Printf(">> Đã đổi thuật toán sang: %s\n", algo)
 			w.Write([]byte("Đã đổi thuật toán thành công:" + algo))
@@ -264,57 +274,55 @@ func main() {
 		}
 	})
 
-	// API Routing chinh
+	// Main routing entrypoint.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Doc Body de lay SUPI
+		// Lock-free load of the current routing snapshot.
+		s := pool.snap.Load()
+
+		// The body is only needed to extract the SUPI for maglev hashing.
 		var bodyBytes []byte
-
-		pool.mutex.RLock()
-		currentAlgo := pool.algo
-		healthyBackends := pool.healthyCache
-		pool.mutex.RUnlock()
-
-		if currentAlgo == "maglev" {
+		if s.algo == "maglev" {
 			var err error
 			bodyBytes, err = io.ReadAll(r.Body)
 			if err == nil {
-				// Khoi phuc lai Body de Reverse Proxy forward tiep di
+				// Restore the body so the reverse proxy can forward it.
 				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			}
 		}
 
-		peer := pool.GetNextPeer(currentAlgo, healthyBackends, bodyBytes)
+		peer := pool.pick(s, bodyBytes)
 		if peer != nil {
-			if currentAlgo == "load-based" {
-				// TANG bien dem tai (Load) truoc khi forward
+			if s.algo == "load-based" {
+				// Track in-flight load only when the load-based algorithm
+				// actually reads it; the atomic ops are pure overhead otherwise.
 				atomic.AddInt32(&peer.ActiveRequests, 1)
-
-				// fmt.Printf("[Gateway] Algo: %s | Forward request tới %s\n", pool.algo, peer.URL.String())
 				peer.ReverseProxy.ServeHTTP(w, r)
-
-				// GIAM bien dem tai sau khi xu ly xong
 				atomic.AddInt32(&peer.ActiveRequests, -1)
 			} else {
 				peer.ReverseProxy.ServeHTTP(w, r)
 			}
 			return
 		}
-		// Tra ve loi 503 neu khong tim thay backend nao song
+		// No live backend: return 503.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte(`{"status": "ERROR", "cause": "NO_BACKEND_AVAILABLE"}`))
 	})
 
-	// Khoi tao HTTP/2 Cleartext Server (theo chuan 3GPP)
+	// HTTP/2 cleartext (h2c) server, per 3GPP SBI.
+	//
+	// Per-request Read/Write deadlines were the single biggest CPU sink under
+	// load: each request re-arms a runtime timer, and with GOMAXPROCS=1 the
+	// scheduler's runtime.(*timers).check burned ~20% of the core. Drop the
+	// per-request deadlines and keep only a coarse IdleTimeout to reap dead
+	// connections. (Acceptable here: this is an internal, trusted h2c hop.)
 	server := &http.Server{
-		Addr:         ":8000",
-		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:        ":8000",
+		Handler:     mux,
+		IdleTimeout: 120 * time.Second,
 	}
 
-	// Ho tro HTTP/2 khong ma hoa (h2c) truc tiep tu thu vien chuan
+	// Enable unencrypted HTTP/2 (h2c) straight from the standard library.
 	server.Protocols = new(http.Protocols)
 	server.Protocols.SetHTTP1(true)
 	server.Protocols.SetUnencryptedHTTP2(true)

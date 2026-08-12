@@ -1,5 +1,8 @@
 package models
 
+// Regenerate models_easyjson.go after changing any struct below:
+//go:generate go run github.com/mailru/easyjson/easyjson -all models.go
+
 //easyjson:json
 type SNssai struct {
 	Sst int    `json:"sst"`
