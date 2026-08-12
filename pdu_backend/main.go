@@ -79,8 +79,23 @@ func initDB(dbURL string) (*pgxpool.Pool, error) {
 		created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 	);`
 
-	if _, err := pool.Exec(ctx, createTableSQL); err != nil {
-		return nil, fmt.Errorf("khong the tao bang pdu_sessions: %w", err)
+	// CREATE TABLE IF NOT EXISTS is not race-safe across processes: when the
+	// three pdu_backend instances boot simultaneously they collide in the
+	// Postgres catalog (SQLSTATE 23505 on pg_type_typname_nsp_index) and all
+	// but one used to crash on log.Fatalf. Retry a few times — once a peer
+	// wins the race the table exists and IF NOT EXISTS becomes a clean no-op.
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if _, err := pool.Exec(ctx, createTableSQL); err != nil {
+			lastErr = err
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("khong the tao bang pdu_sessions: %w", lastErr)
 	}
 
 	return pool, nil
@@ -184,9 +199,11 @@ func pduSessionHandler(w http.ResponseWriter, r *http.Request, instanceName stri
 		return
 	}
 
-	// Tra response ve gateway
+	// Build the response for the gateway. NOTE: the literal "%d" here was a
+	// leftover from the fmt.Sprintf refactor and produced refs like
+	// "ctx-%d5"; concatenate the decimal id directly instead.
 	response := models.CreateSessionResponse{
-		SmContextRef: "http://gw/nsmf-pdusession/v1/sm-contexts/ctx-%d" + strconv.Itoa(req.PduSessionId), // fmt.Sprintf("http://gw/nsmf-pdusession/v1/sm-contexts/ctx-%d", req.PduSessionId),
+		SmContextRef: "http://gw/nsmf-pdusession/v1/sm-contexts/ctx-" + strconv.Itoa(req.PduSessionId),
 		Supi:         req.Supi,
 		PduSessionId: req.PduSessionId,
 		HandledBy:    instanceName,
