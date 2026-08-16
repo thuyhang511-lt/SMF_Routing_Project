@@ -11,7 +11,6 @@ pdu_app
 *.out
 /gateway/gateway_app
 /pdu_backend/pdu_app
-/pdu_backend/models/models_easyjson.go
 
 # ==== Go module cache / vendor (nếu có) ====
 vendor/
