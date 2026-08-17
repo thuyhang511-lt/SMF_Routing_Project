@@ -152,6 +152,9 @@ services:
     network_mode: "host"
     environment:
       - GATEWAY_URL=http://127.0.0.1:8000
+      - WORKERS=100
+      - REQUESTS_PER_WORKER=500
+      - NUM_CLIENTS=8
     depends_on:
       - gateway
     profiles:
